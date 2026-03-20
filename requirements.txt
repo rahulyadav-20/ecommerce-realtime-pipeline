@@ -1,0 +1,50 @@
+# PySpark and Streaming
+pyspark==3.5.0
+py4j==0.10.9.7
+
+# Kafka
+kafka-python==2.0.2
+confluent-kafka==2.3.0
+
+# Apache Iceberg
+pyiceberg==0.5.1
+
+# Data Processing
+pandas
+numpy==1.26.2
+
+# Database Connectors
+psycopg2-binary==2.9.9
+sqlalchemy==2.0.23
+
+# Airflow
+apache-airflow
+apache-airflow-providers-apache-spark
+apache-airflow-providers-postgres
+
+# Monitoring and Logging
+prometheus-client
+python-json-logger
+
+# HTTP Requests
+requests
+urllib3
+
+# Configuration
+pyyaml
+python-dotenv
+
+# Testing
+pytest
+pytest-spark
+pytest-mock
+
+# Code Quality
+black
+flake8
+pylint
+
+# Utilities
+click
+colorlog
+tqdm

@@ -1,0 +1,23 @@
+kafka:
+  bootstrap_servers: "localhost:9092"
+  topic: "ecommerce-events"
+  druid_topic: "druid-ecommerce-metrics"
+
+storage:
+  storage_type: "hdfs"
+  bronze_path: "hdfs://localhost:9000/data/bronze/ecommerce_events"
+  silver_path: "hdfs://localhost:9000/data/silver/ecommerce"
+  checkpoint_location: "hdfs://localhost:9000/checkpoints/ecommerce_pipeline"
+
+streaming:
+  trigger_interval: "30 seconds"
+  watermark_delay: "10 minutes"
+
+spark:
+  app_name: "EcommerceRealtimePipeline"
+  master: "spark://localhost:7077"
+  shuffle_partitions: 6
+
+monitoring:
+  log_level: "INFO"
+  max_kafka_lag: 10000
