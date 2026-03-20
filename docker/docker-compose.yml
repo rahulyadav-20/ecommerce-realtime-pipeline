@@ -52,6 +52,7 @@ services:
   # ============================================================================
   namenode:
     image: bde2020/hadoop-namenode:latest
+    platform: linux/amd64
     container_name: namenode
     hostname: namenode
     ports:
@@ -71,6 +72,7 @@ services:
   # ============================================================================
   datanode:
     image: bde2020/hadoop-datanode:latest
+    platform: linux/amd64
     container_name: datanode
     hostname: datanode
     depends_on:
@@ -97,113 +99,100 @@ services:
       POSTGRES_DB: druid
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U druid"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # ============================================================================
-  # DRUID COORDINATOR
+  # DRUID COORDINATOR + OVERLORD (NO JVM OPTS - USING DEFAULTS)
   # ============================================================================
   druid-coordinator:
     image: apache/druid:26.0.0
+    platform: linux/amd64
     container_name: druid-coordinator
+    hostname: druid-coordinator
     depends_on:
       - zookeeper
       - postgres
     ports:
-      - "8088:8081"
-    command: coordinator-overlord
-    environment:
-      - DRUID_XMS=256m
-      - DRUID_XMX=512m
-      - druid_zk_service_host=zookeeper:2181
-      - druid_metadata_storage_type=postgresql
-      - druid_metadata_storage_connector_connectURI=jdbc:postgresql://postgres:5432/druid
-      - druid_metadata_storage_connector_user=druid
-      - druid_metadata_storage_connector_password=druid
-      - druid_coordinator_asOverlord_enabled=true
-      - druid_coordinator_asOverlord_overlordService=druid/overlord
-      - druid_indexer_runner_type=remote
+      - "8081:8081"
     volumes:
+      - ./druid-conf/common.runtime.properties:/opt/druid/conf/druid/cluster/_common/common.runtime.properties
+      - ./druid-conf/coordinator.runtime.properties:/opt/druid/conf/druid/cluster/_common/coordinator.runtime.properties
+      - ./druid-conf/coordinator.jvm.config:/opt/druid/conf/druid/cluster/misc/jvm.config
       - druid-coordinator-data:/opt/druid/var
+    command: coordinator-overlord
 
-  # ============================================================================
-  # DRUID BROKER
-  # ============================================================================
   druid-broker:
     image: apache/druid:26.0.0
+    platform: linux/amd64
     container_name: druid-broker
+    hostname: druid-broker
     depends_on:
       - zookeeper
       - druid-coordinator
     ports:
       - "8082:8082"
-    command: broker
-    environment:
-      - DRUID_XMS=512m
-      - DRUID_XMX=1g
-      - druid_processing_buffer_sizeBytes=134217728
-      - druid_processing_numThreads=2
     volumes:
+      - ./druid-conf/common.runtime.properties:/opt/druid/conf/druid/cluster/_common/common.runtime.properties
+      - ./druid-conf/broker.runtime.properties:/opt/druid/conf/druid/cluster/_common/broker.runtime.properties
+      - ./druid-conf/broker.jvm.config:/opt/druid/conf/druid/cluster/misc/jvm.config
       - druid-broker-data:/opt/druid/var
+    command: broker
 
-  # ============================================================================
-  # DRUID HISTORICAL
-  # ============================================================================
   druid-historical:
     image: apache/druid:26.0.0
+    platform: linux/amd64
     container_name: druid-historical
+    hostname: druid-historical
     depends_on:
       - zookeeper
       - druid-coordinator
     ports:
       - "8083:8083"
-    command: historical
-    environment:
-      - DRUID_XMS=512m
-      - DRUID_XMX=1g
-      - druid_processing_buffer_sizeBytes=134217728
-      - druid_processing_numThreads=2
-      - druid_segmentCache_locations=[{"path":"/opt/druid/var/druid/segment-cache","maxSize":10737418240}]
     volumes:
+      - ./druid-conf/common.runtime.properties:/opt/druid/conf/druid/cluster/_common/common.runtime.properties
+      - ./druid-conf/historical.runtime.properties:/opt/druid/conf/druid/cluster/_common/historical.runtime.properties
+      - ./druid-conf/historical.jvm.config:/opt/druid/conf/druid/cluster/misc/jvm.config
       - druid-historical-data:/opt/druid/var
+    command: historical
 
-  # ============================================================================
-  # DRUID MIDDLEMANAGER
-  # ============================================================================
   druid-middlemanager:
     image: apache/druid:26.0.0
+    platform: linux/amd64
     container_name: druid-middlemanager
+    hostname: druid-middlemanager
     depends_on:
       - zookeeper
       - druid-coordinator
     ports:
       - "8091:8091"
-      - "8100-8105:8100-8105"
-    command: middleManager
-    environment:
-      - DRUID_XMS=128m
-      - DRUID_XMX=256m
-      - druid_indexer_runner_javaOptsArray=["-server","-Xms256m","-Xmx256m"]
-      - druid_indexer_fork_property_druid_processing_buffer_sizeBytes=134217728
-      - druid_indexer_fork_property_druid_processing_numThreads=2
     volumes:
+      - ./druid-conf/common.runtime.properties:/opt/druid/conf/druid/cluster/_common/common.runtime.properties
+      - ./druid-conf/middlemanager.runtime.properties:/opt/druid/conf/druid/cluster/_common/middlemanager.runtime.properties
+      - ./druid-conf/middlemanager.jvm.config:/opt/druid/conf/druid/cluster/misc/jvm.config
       - druid-middlemanager-data:/opt/druid/var
+    command: middleManager
 
-  # ============================================================================
-  # DRUID ROUTER
-  # ============================================================================
   druid-router:
     image: apache/druid:26.0.0
+    platform: linux/amd64
     container_name: druid-router
+    hostname: druid-router
     depends_on:
       - druid-broker
       - druid-coordinator
     ports:
       - "8888:8888"
-    command: router
-    environment:
-      - DRUID_XMS=128m
-      - DRUID_XMX=256m
     volumes:
+      - ./druid-conf/common.runtime.properties:/opt/druid/conf/druid/cluster/_common/common.runtime.properties
+      - ./druid-conf/router.runtime.properties:/opt/druid/conf/druid/cluster/_common/router.runtime.properties
+      - ./druid-conf/router.jvm.config:/opt/druid/conf/druid/cluster/misc/jvm.config
       - druid-router-data:/opt/druid/var
+    command: router
+
 
   # ============================================================================
   # SPARK MASTER
@@ -216,57 +205,39 @@ services:
       - "8080:8080"
       - "7077:7077"
       - "4040:4040"
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
     environment:
-      - SPARK_MODE=master
-      - SPARK_RPC_AUTHENTICATION_ENABLED=no
-      - SPARK_RPC_ENCRYPTION_ENABLED=no
-      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
-      - SPARK_SSL_ENABLED=no
+      - SPARK_NO_DAEMONIZE=true
     volumes:
       - ./src:/opt/spark-apps
-      - spark-master-data:/opt/bitnami/spark
 
-  # ============================================================================
-  # SPARK WORKER 1
-  # ============================================================================
   spark-worker-1:
     image: apache/spark:latest
     container_name: spark-worker-1
+    hostname: spark-worker-1
     depends_on:
       - spark-master
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
     environment:
-      - SPARK_MODE=worker
-      - SPARK_MASTER_URL=spark://spark-master:7077
-      - SPARK_WORKER_MEMORY=2G
+      - SPARK_NO_DAEMONIZE=true
+      - SPARK_WORKER_MEMORY=2g
       - SPARK_WORKER_CORES=2
-      - SPARK_RPC_AUTHENTICATION_ENABLED=no
-      - SPARK_RPC_ENCRYPTION_ENABLED=no
-      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
-      - SPARK_SSL_ENABLED=no
     volumes:
       - ./src:/opt/spark-apps
-      - spark-worker-1-data:/opt/bitnami/spark
 
-  # ============================================================================
-  # SPARK WORKER 2
-  # ============================================================================
   spark-worker-2:
     image: apache/spark:latest
     container_name: spark-worker-2
+    hostname: spark-worker-2
     depends_on:
       - spark-master
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
     environment:
-      - SPARK_MODE=worker
-      - SPARK_MASTER_URL=spark://spark-master:7077
-      - SPARK_WORKER_MEMORY=2G
+      - SPARK_NO_DAEMONIZE=true
+      - SPARK_WORKER_MEMORY=2g
       - SPARK_WORKER_CORES=2
-      - SPARK_RPC_AUTHENTICATION_ENABLED=no
-      - SPARK_RPC_ENCRYPTION_ENABLED=no
-      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
-      - SPARK_SSL_ENABLED=no
     volumes:
       - ./src:/opt/spark-apps
-      - spark-worker-2-data:/opt/bitnami/spark
 
   # ============================================================================
   # AIRFLOW POSTGRES
@@ -280,16 +251,21 @@ services:
       POSTGRES_DB: airflow
     volumes:
       - airflow-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # ============================================================================
-  # ============================================================================
-  # AIRFLOW DB INIT
+  # AIRFLOW DB INIT (One-time setup)
   # ============================================================================
   airflow-init:
     image: apache/airflow:2.8.4
     container_name: airflow-init
     depends_on:
-      - airflow-postgres
+      airflow-postgres:
+        condition: service_healthy
     environment:
       - AIRFLOW__CORE__EXECUTOR=LocalExecutor
       - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
@@ -303,17 +279,23 @@ services:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
-    command: bash -c "airflow db init && airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true"
-    profiles:
-      - init
+      - ./airflow-init.sh:/airflow-init.sh
+      - airflow-init-marker:/opt/airflow
+    entrypoint: /bin/bash
+    command: /airflow-init.sh
+    restart: "no"
 
+  # ============================================================================
   # AIRFLOW WEBSERVER
   # ============================================================================
   airflow-webserver:
     image: apache/airflow:2.8.4
     container_name: airflow-webserver
     depends_on:
-      - airflow-postgres
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
     ports:
       - "8081:8080"
     environment:
@@ -330,7 +312,14 @@ services:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
+      - airflow-init-marker:/opt/airflow
     command: webserver
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
   # ============================================================================
   # AIRFLOW SCHEDULER
@@ -339,7 +328,10 @@ services:
     image: apache/airflow:2.8.4
     container_name: airflow-scheduler
     depends_on:
-      - airflow-postgres
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
     environment:
       - AIRFLOW__CORE__EXECUTOR=LocalExecutor
       - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
@@ -350,6 +342,7 @@ services:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
+      - airflow-init-marker:/opt/airflow
     command: scheduler
 
 volumes:
@@ -368,6 +361,7 @@ volumes:
   spark-worker-1-data:
   spark-worker-2-data:
   airflow-postgres-data:
+  airflow-init-marker:
 
 networks:
   default:

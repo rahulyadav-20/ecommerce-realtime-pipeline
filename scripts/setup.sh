@@ -97,7 +97,7 @@ LOG_LEVEL=INFO
 EOF
 
 # Create Hadoop environment file
-cat > config/hadoop.env << EOF
+cat > docker/config/hadoop.env << EOF
 CORE_CONF_fs_defaultFS=hdfs://namenode:9000
 CORE_CONF_hadoop_http_staticuser_user=root
 CORE_CONF_hadoop_proxyuser_hue_hosts=*
