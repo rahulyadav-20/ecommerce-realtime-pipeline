@@ -1,0 +1,91 @@
+{
+  "type": "kafka",
+  "spec": {
+
+    "dataSchema": {
+      "dataSource": "ecommerce_events",
+
+      "timestampSpec": {
+        "column": "event_time",
+        "format": "millis"
+      },
+
+      "dimensionsSpec": {
+        "dimensions": [
+          { "type": "string", "name": "event_type"   },
+          { "type": "string", "name": "category"     },
+          { "type": "string", "name": "payment_mode" },
+          { "type": "string", "name": "device"       }
+        ],
+        "dimensionExclusions": [
+          "event_id", "session_id", "user_id",
+          "product_id", "ip", "quantity", "price"
+        ]
+      },
+
+      "metricsSpec": [
+        { "type": "count",    "name": "events"                                  },
+        { "type": "longSum",  "name": "qty",        "fieldName": "quantity"    },
+        { "type": "doubleSum","name": "revenue",     "fieldName": "price"      },
+        {
+          "type"      : "HLLSketchBuild",
+          "name"      : "uniq_users",
+          "fieldName" : "user_id",
+          "lgK"       : 12,
+          "tgtHllType": "HLL_4"
+        }
+      ],
+
+      "granularitySpec": {
+        "type"               : "uniform",
+        "segmentGranularity" : "HOUR",
+        "queryGranularity"   : "MINUTE",
+        "rollup"             : true
+      }
+    },
+
+    "ioConfig": {
+      "type"  : "kafka",
+      "topic" : "ecommerce.events.clean.v1",
+
+      "inputFormat": {
+        "type": "avro_stream",
+        "avroBytesDecoder": {
+          "type"    : "schema_registry",
+          "url"     : "http://schema-registry:8081",
+          "capacity": 1000
+        },
+        "flattenSpec": {
+          "useFieldDiscovery": true,
+          "fields": []
+        }
+      },
+
+      "consumerProperties": {
+        "bootstrap.servers": "kafka-1:29092,kafka-2:29093",
+        "group.id"         : "druid-ecom-gold",
+        "isolation.level"  : "read_committed"
+      },
+
+      "taskCount"        : 2,
+      "replicas"         : 2,
+      "taskDuration"     : "PT1H",
+      "useEarliestOffset": false,
+      "completionTimeout": "PT30M"
+    },
+
+    "tuningConfig": {
+      "type"                    : "kafka",
+      "maxRowsInMemory"         : 100000,
+      "intermediatePersistPeriod": "PT10M",
+      "maxBytesInMemory"        : 0,
+      "maxRowsPerSegment"       : 5000000,
+      "indexSpec": {
+        "bitmap"              : { "type": "roaring" },
+        "dimensionCompression": "lz4",
+        "metricCompression"   : "lz4",
+        "longEncoding"        : "longs"
+      }
+    }
+  }
+}

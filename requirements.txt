@@ -1,50 +1,24 @@
-# PySpark and Streaming
-pyspark==3.5.0
-py4j==0.10.9.7
+# =============================================================================
+# E-Commerce Realtime Pipeline — Python Dependencies
+# Install: pip install -r requirements.txt
+# =============================================================================
 
-# Kafka
-kafka-python==2.0.2
-confluent-kafka==2.3.0
+# --- Kafka + Schema Registry (Avro) -----------------------------------------
+# confluent-kafka[avro] bundles:
+#   confluent-kafka       — C-extension Kafka client (librdkafka)
+#   confluent-kafka[avro] — AvroSerializer / AvroDeserializer
+#   fastavro              — fast Avro encode/decode
+confluent-kafka[avro]==2.5.0
 
-# Apache Iceberg
-pyiceberg==0.5.1
+# --- Airflow DAG utilities ---------------------------------------------------
+# Only needed if running Airflow DAGs locally (not inside the Airflow container)
+# apache-airflow==2.9.3
 
-# Data Processing
-pandas
-numpy==1.26.2
+# --- Data quality (Great Expectations DAG) -----------------------------------
+# great-expectations==0.18.19
 
-# Database Connectors
-psycopg2-binary==2.9.9
-sqlalchemy==2.0.23
+# --- Iceberg / Trino client (optional, for ad-hoc queries) ------------------
+# trino==0.329.0
 
-# Airflow
-apache-airflow
-apache-airflow-providers-apache-spark
-apache-airflow-providers-postgres
-
-# Monitoring and Logging
-prometheus-client
-python-json-logger
-
-# HTTP Requests
-requests
-urllib3
-
-# Configuration
-pyyaml
-python-dotenv
-
-# Testing
-pytest
-pytest-spark
-pytest-mock
-
-# Code Quality
-black
-flake8
-pylint
-
-# Utilities
-click
-colorlog
-tqdm
+# --- General utilities -------------------------------------------------------
+requests==2.32.3          # used by register-schema.sh fallback and health checks

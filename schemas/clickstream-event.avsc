@@ -1,0 +1,92 @@
+{
+  "namespace": "com.ecom.events",
+  "type": "record",
+  "name": "ClickstreamEvent",
+  "doc": "A single e-commerce event emitted by web, mobile, order, or payment microservices.",
+  "fields": [
+    {
+      "name": "event_id",
+      "type": "string",
+      "doc": "Globally unique event identifier. Must be stable across producer retries (used for Flink dedup)."
+    },
+    {
+      "name": "session_id",
+      "type": "string",
+      "doc": "Browser / app session that produced this event."
+    },
+    {
+      "name": "event_time",
+      "type": {
+        "type": "long",
+        "logicalType": "timestamp-millis"
+      },
+      "doc": "Event wall-clock time in milliseconds since epoch (UTC). Flink validates within ±48 h of processing time."
+    },
+    {
+      "name": "event_type",
+      "type": {
+        "type": "enum",
+        "name": "EventType",
+        "namespace": "com.ecom.events",
+        "doc": "The action the user took. Drives Druid rollup dimensions and ClickHouse funnel MVs.",
+        "symbols": [
+          "VIEW",
+          "ADD_TO_CART",
+          "REMOVE_CART",
+          "WISHLIST",
+          "ORDER_CREATED",
+          "PAYMENT_SUCCESS",
+          "PAYMENT_FAILED",
+          "ORDER_CANCELLED",
+          "REFUND"
+        ]
+      }
+    },
+    {
+      "name": "device",
+      "type": "string",
+      "doc": "Canonical device class. Flink normalises to one of: web | android | ios | other."
+    },
+    {
+      "name": "ip",
+      "type": "string",
+      "doc": "Client IP address. Used for geo-enrichment downstream; not stored in ClickHouse."
+    },
+    {
+      "name": "user_id",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "Authenticated user ID. Null for anonymous sessions."
+    },
+    {
+      "name": "product_id",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "SKU or product identifier. Null for non-product events (e.g. PAYMENT_FAILED)."
+    },
+    {
+      "name": "category",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "Product category. Flink lowercases and trims. Used as Druid rollup dimension."
+    },
+    {
+      "name": "quantity",
+      "type": ["null", "int"],
+      "default": null,
+      "doc": "Item count. Flink validates >= 0. Null for non-purchase events."
+    },
+    {
+      "name": "price",
+      "type": ["null", "double"],
+      "default": null,
+      "doc": "Unit price in the tenant currency. Flink validates >= 0. Null for non-purchase events."
+    },
+    {
+      "name": "payment_mode",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "Payment method (e.g. credit_card, upi, wallet). Null unless event_type is PAYMENT_*."
+    }
+  ]
+}

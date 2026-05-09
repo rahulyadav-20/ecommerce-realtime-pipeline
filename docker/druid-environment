@@ -1,0 +1,47 @@
+# Druid environment — loaded by all Druid service containers via env_file
+# Matches our postgres + zookeeper service names in docker-compose.yml
+
+# JVM heap
+DRUID_XMX=512m
+DRUID_XMS=512m
+DRUID_MAXNEWSIZE=128m
+DRUID_NEWSIZE=128m
+DRUID_MAXDIRECTMEMORYSIZE=1g
+
+# Metadata (PostgreSQL)
+druid_metadata_storage_type=postgresql
+druid_metadata_storage_connector_connectURI=jdbc:postgresql://druid-postgres:5432/druid
+druid_metadata_storage_connector_user=druid
+druid_metadata_storage_connector_password=druid
+
+# ZooKeeper
+druid_zk_service_host=zookeeper
+
+# Deep storage — local shared volume (swap for S3/MinIO in prod)
+druid_storage_type=local
+druid_storage_storageDirectory=/opt/shared/segments
+
+# Indexing logs
+druid_indexer_logs_type=file
+druid_indexer_logs_directory=/opt/shared/indexing-logs
+
+# Extensions — single line, no folded YAML
+druid_extensions_loadList=["druid-histogram","druid-datasketches","druid-lookups-cached-global","postgresql-metadata-storage","druid-kafka-indexing-service","druid-avro-extensions"]
+
+# Schema Registry — used by druid-avro-extensions for Confluent wire format decoding
+druid_kafka_schema_registry_url=http://schema-registry:8081
+
+# Processing
+druid_processing_buffer_sizeBytes=200000000
+druid_processing_numThreads=2
+druid_processing_numMergeBuffers=2
+
+# Coordinator
+druid_coordinator_balancer_strategy=cachingCost
+
+# MiddleManager peon JVM
+druid_indexer_runner_javaOptsArray=["-server","-Xmx512m","-Xms512m","-XX:MaxDirectMemorySize=1g","-Duser.timezone=UTC","-Dfile.encoding=UTF-8","-XX:+ExitOnOutOfMemoryError","-XX:+HeapDumpOnOutOfMemoryError"]
+druid_indexer_fork_property_druid_processing_buffer_sizeBytes=134217728
+
+# Log4j — single-line XML
+DRUID_LOG4J=<?xml version="1.0" encoding="UTF-8" ?><Configuration status="WARN"><Appenders><Console name="Console" target="SYSTEM_OUT"><PatternLayout pattern="%d{ISO8601} %p [%t] %c - %m%n"/></Console></Appenders><Loggers><Root level="info"><AppenderRef ref="Console"/></Root><Logger name="org.apache.druid.jetty.RequestLog" additivity="false" level="DEBUG"><AppenderRef ref="Console"/></Logger></Loggers></Configuration>

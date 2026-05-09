@@ -1,0 +1,45 @@
+metricbeat.modules:
+  - module: system
+    period: 30s
+    metricsets:
+      - cpu
+      - memory
+      - network
+      - diskio
+      - filesystem
+
+  - module: docker
+    period: 30s
+    hosts: ["unix:///var/run/docker.sock"]
+    metricsets:
+      - container
+      - cpu
+      - diskio
+      - memory
+      - network
+
+  - module: http
+    period: 30s
+    metricsets: ["json"]
+    hosts:
+      - "http://flink-jobmanager:8081/overview"
+    namespace: flink
+    path: "/"
+    method: GET
+
+processors:
+  - add_host_metadata: ~
+  - add_docker_metadata:
+      host: "unix:///var/run/docker.sock"
+
+output.elasticsearch:
+  hosts: ["${ELASTICSEARCH_HOST}"]
+  index: "metricbeat-%{+YYYY.MM.dd}"
+
+setup.kibana:
+  host: "${KIBANA_HOST}"
+
+setup.template.name: "metricbeat"
+setup.template.pattern: "metricbeat-*"
+
+logging.level: warning

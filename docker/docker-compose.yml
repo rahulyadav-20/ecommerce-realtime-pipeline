@@ -1,11 +1,132 @@
-#version: '3.8'
+# =============================================================================
+# Real-Time E-Commerce Analytics Pipeline — Docker Compose
+# =============================================================================
+# Stack: Kafka (2 brokers) · Schema Registry · Kafka Connect
+#        Flink 1.19 (1 JM + 2 TMs) · Druid 36 · ClickHouse 24
+#        MinIO · Iceberg REST · Airflow 2.9 · ELK 8.13
+#
+# UI summary (all accessible from host):
+#   http://localhost:8080  → Airflow
+#   http://localhost:8081  → Schema Registry UI     (Landoop)
+#   http://localhost:8082  → Flink Job Manager UI
+#   http://localhost:8083  → Kafka Connect REST
+#   http://localhost:8085  → Kafka UI               (topics, groups, connect, schema registry)
+#   http://localhost:8888  → Druid Router / Console
+#   http://localhost:8123  → ClickHouse HTTP / Play (/play)
+#   http://localhost:8124  → ClickHouse UI          (ch-ui)
+#   http://localhost:8181  → Iceberg REST Catalog
+#   http://localhost:9001  → MinIO Console
+#   http://localhost:9002  → MinIO S3 API            (host:9000 reserved by corporate VPN)
+#   http://localhost:9200  → Elasticsearch REST
+#   http://localhost:5601  → Kibana
+# =============================================================================
 
+# ---------------------------------------------------------------------------
+# Shared YAML anchors
+# ---------------------------------------------------------------------------
+x-kafka-brokers: &kafka-brokers "kafka-1:29092,kafka-2:29093"
+
+x-flink-env: &flink-env
+  FLINK_PROPERTIES: |
+    jobmanager.rpc.address: flink-jobmanager
+    taskmanager.numberOfTaskSlots: 4
+    state.backend: rocksdb
+    state.backend.incremental: true
+    state.checkpoints.dir: s3://flink-ckpt/ecom/
+    state.savepoints.dir: s3://flink-savepoints/ecom/
+    s3.endpoint: http://minio:9000
+    s3.access-key: minioadmin
+    s3.secret-key: minioadmin
+    s3.path.style.access: true
+    execution.checkpointing.interval: 30000
+    execution.checkpointing.mode: EXACTLY_ONCE
+
+x-flink-taskmanager: &flink-taskmanager
+  image: flink:1.19-java17
+  command: taskmanager
+  environment:
+    <<: *flink-env
+  depends_on:
+    flink-jobmanager:
+      condition: service_healthy
+  networks:
+    - ecom-net
+
+x-druid-common: &druid-common
+  image: apache/druid:36.0.0
+  platform: linux/amd64
+  env_file:
+    - druid-environment
+  volumes:
+    - druid-data:/opt/shared
+  depends_on:
+    druid-postgres:
+      condition: service_healthy
+    zookeeper:
+      condition: service_healthy
+  networks:
+    - ecom-net
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.9.3
+  environment:
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@airflow-postgres/airflow
+    AIRFLOW__CELERY__BROKER_URL: redis://:@airflow-redis:6379/0
+    AIRFLOW__CORE__FERNET_KEY: "RiZ4PqTCKGR0DvOlR0yB6MJwxaO_6yJ9R8J2v5fXdoI="
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session"
+    AIRFLOW__WEBSERVER__SECRET_KEY: "ecom-pipeline-secret"
+  volumes:
+    - ../airflow/dags:/opt/airflow/dags
+    - airflow-logs:/opt/airflow/logs
+    - airflow-plugins:/opt/airflow/plugins
+  depends_on:
+    airflow-postgres:
+      condition: service_healthy
+    airflow-redis:
+      condition: service_healthy
+  networks:
+    - ecom-net
+
+# ---------------------------------------------------------------------------
+# Named volumes
+# ---------------------------------------------------------------------------
+volumes:
+  zookeeper-data:
+  zookeeper-log:
+  kafka1-data:
+  kafka2-data:
+  druid-postgres-data:
+  druid-data:
+  druid-coordinator-var:
+  druid-broker-var:
+  druid-historical-var:
+  druid-middlemanager-var:
+  druid-router-var:
+  clickhouse-data:
+  minio-data:
+  elasticsearch-data:
+  airflow-postgres-data:
+  airflow-logs:
+  airflow-plugins:
+
+networks:
+  ecom-net:
+    driver: bridge
+
+# ===========================================================================
+# SERVICES
+# ===========================================================================
 services:
-  # ============================================================================
-  # ZOOKEEPER
-  # ============================================================================
+
+  # =========================================================================
+  # ZOOKEEPER  (shared by Kafka & Druid)
+  # =========================================================================
   zookeeper:
-    image: confluentinc/cp-zookeeper:latest
+    image: confluentinc/cp-zookeeper:7.6.1
     hostname: zookeeper
     container_name: zookeeper
     ports:
@@ -13,356 +134,692 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_SYNC_LIMIT: 2
+      KAFKA_OPTS: "-Dzookeeper.4lw.commands.whitelist=*"
     volumes:
       - zookeeper-data:/var/lib/zookeeper/data
-      - zookeeper-logs:/var/lib/zookeeper/log
+      - zookeeper-log:/var/lib/zookeeper/log
+    networks:
+      - ecom-net
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/2181'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-  # ============================================================================
-  # KAFKA
-  # ============================================================================
-  kafka:
-    image: confluentinc/cp-kafka:5.5.0
-    hostname: kafka
-    container_name: kafka
+  # =========================================================================
+  # KAFKA — 2 brokers, RF=2, min.isr=1
+  # =========================================================================
+  kafka-1:
+    image: confluentinc/cp-kafka:7.6.1
+    hostname: kafka-1
+    container_name: kafka-1
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_healthy
     ports:
       - "9092:9092"
-      - "9101:9101"
     environment:
       KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:29092,PLAINTEXT_HOST://localhost:9092
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 2
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
-      KAFKA_JMX_PORT: 9101
-      KAFKA_JMX_HOSTNAME: localhost
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 2
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      KAFKA_NUM_PARTITIONS: 12
       KAFKA_LOG_RETENTION_HOURS: 168
-      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+      KAFKA_COMPRESSION_TYPE: zstd
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
     volumes:
-      - kafka-data:/var/lib/kafka/data
-
-  # ============================================================================
-  # HDFS NAMENODE
-  # ============================================================================
-  namenode:
-    image: bde2020/hadoop-namenode:latest
-    platform: linux/amd64
-    container_name: namenode
-    hostname: namenode
-    ports:
-      - "9870:9870"
-      - "9000:9000"
-    environment:
-      CLUSTER_NAME: "ecommerce-cluster"
-      CORE_CONF_fs_defaultFS: "hdfs://namenode:9000"
-      HDFS_CONF_dfs_replication: 1
-    volumes:
-      - namenode-data:/hadoop/dfs/name
-    env_file:
-      - ./config/hadoop.env
-
-  # ============================================================================
-  # HDFS DATANODE
-  # ============================================================================
-  datanode:
-    image: bde2020/hadoop-datanode:latest
-    platform: linux/amd64
-    container_name: datanode
-    hostname: datanode
-    depends_on:
-      - namenode
-    environment:
-      CORE_CONF_fs_defaultFS: "hdfs://namenode:9000"
-      HDFS_CONF_dfs_replication: 1
-    volumes:
-      - datanode-data:/hadoop/dfs/data
-    env_file:
-      - ./config/hadoop.env
-
-  # ============================================================================
-  # POSTGRES (for Druid metadata)
-  # ============================================================================
-  postgres:
-    image: postgres:15
-    container_name: postgres
-    ports:
-      - "5432:5432"
-    environment:
-      POSTGRES_USER: druid
-      POSTGRES_PASSWORD: druid
-      POSTGRES_DB: druid
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - kafka1-data:/var/lib/kafka/data
+    networks:
+      - ecom-net
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U druid"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # ============================================================================
-  # DRUID COORDINATOR + OVERLORD (NO JVM OPTS - USING DEFAULTS)
-  # ============================================================================
-  druid-coordinator:
-    image: apache/druid:26.0.0
-    platform: linux/amd64
-    container_name: druid-coordinator
-    hostname: druid-coordinator
-    depends_on:
-      - zookeeper
-      - postgres
-    ports:
-      - "8081:8081"
-    volumes:
-      - ./druid-conf/common.runtime.properties:/opt/druid/conf/druid/cluster/_common/common.runtime.properties
-      - ./druid-conf/coordinator.runtime.properties:/opt/druid/conf/druid/cluster/_common/coordinator.runtime.properties
-      - ./druid-conf/coordinator.jvm.config:/opt/druid/conf/druid/cluster/misc/jvm.config
-      - druid-coordinator-data:/opt/druid/var
-    command: coordinator-overlord
-
-  druid-broker:
-    image: apache/druid:26.0.0
-    platform: linux/amd64
-    container_name: druid-broker
-    hostname: druid-broker
-    depends_on:
-      - zookeeper
-      - druid-coordinator
-    ports:
-      - "8082:8082"
-    volumes:
-      - ./druid-conf/common.runtime.properties:/opt/druid/conf/druid/cluster/_common/common.runtime.properties
-      - ./druid-conf/broker.runtime.properties:/opt/druid/conf/druid/cluster/_common/broker.runtime.properties
-      - ./druid-conf/broker.jvm.config:/opt/druid/conf/druid/cluster/misc/jvm.config
-      - druid-broker-data:/opt/druid/var
-    command: broker
-
-  druid-historical:
-    image: apache/druid:26.0.0
-    platform: linux/amd64
-    container_name: druid-historical
-    hostname: druid-historical
-    depends_on:
-      - zookeeper
-      - druid-coordinator
-    ports:
-      - "8083:8083"
-    volumes:
-      - ./druid-conf/common.runtime.properties:/opt/druid/conf/druid/cluster/_common/common.runtime.properties
-      - ./druid-conf/historical.runtime.properties:/opt/druid/conf/druid/cluster/_common/historical.runtime.properties
-      - ./druid-conf/historical.jvm.config:/opt/druid/conf/druid/cluster/misc/jvm.config
-      - druid-historical-data:/opt/druid/var
-    command: historical
-
-  druid-middlemanager:
-    image: apache/druid:26.0.0
-    platform: linux/amd64
-    container_name: druid-middlemanager
-    hostname: druid-middlemanager
-    depends_on:
-      - zookeeper
-      - druid-coordinator
-    ports:
-      - "8091:8091"
-    volumes:
-      - ./druid-conf/common.runtime.properties:/opt/druid/conf/druid/cluster/_common/common.runtime.properties
-      - ./druid-conf/middlemanager.runtime.properties:/opt/druid/conf/druid/cluster/_common/middlemanager.runtime.properties
-      - ./druid-conf/middlemanager.jvm.config:/opt/druid/conf/druid/cluster/misc/jvm.config
-      - druid-middlemanager-data:/opt/druid/var
-    command: middleManager
-
-  druid-router:
-    image: apache/druid:26.0.0
-    platform: linux/amd64
-    container_name: druid-router
-    hostname: druid-router
-    depends_on:
-      - druid-broker
-      - druid-coordinator
-    ports:
-      - "8888:8888"
-    volumes:
-      - ./druid-conf/common.runtime.properties:/opt/druid/conf/druid/cluster/_common/common.runtime.properties
-      - ./druid-conf/router.runtime.properties:/opt/druid/conf/druid/cluster/_common/router.runtime.properties
-      - ./druid-conf/router.jvm.config:/opt/druid/conf/druid/cluster/misc/jvm.config
-      - druid-router-data:/opt/druid/var
-    command: router
-
-
-  # ============================================================================
-  # SPARK MASTER
-  # ============================================================================
-  spark-master:
-    image: apache/spark:latest
-    container_name: spark-master
-    hostname: spark-master
-    ports:
-      - "8080:8080"
-      - "7077:7077"
-      - "4040:4040"
-    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
-    environment:
-      - SPARK_NO_DAEMONIZE=true
-    volumes:
-      - ./src:/opt/spark-apps
-
-  spark-worker-1:
-    image: apache/spark:latest
-    container_name: spark-worker-1
-    hostname: spark-worker-1
-    depends_on:
-      - spark-master
-    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
-    environment:
-      - SPARK_NO_DAEMONIZE=true
-      - SPARK_WORKER_MEMORY=2g
-      - SPARK_WORKER_CORES=2
-    volumes:
-      - ./src:/opt/spark-apps
-
-  spark-worker-2:
-    image: apache/spark:latest
-    container_name: spark-worker-2
-    hostname: spark-worker-2
-    depends_on:
-      - spark-master
-    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
-    environment:
-      - SPARK_NO_DAEMONIZE=true
-      - SPARK_WORKER_MEMORY=2g
-      - SPARK_WORKER_CORES=2
-    volumes:
-      - ./src:/opt/spark-apps
-
-  # ============================================================================
-  # AIRFLOW POSTGRES
-  # ============================================================================
-  airflow-postgres:
-    image: postgres:15
-    container_name: airflow-postgres
-    environment:
-      POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow
-      POSTGRES_DB: airflow
-    volumes:
-      - airflow-postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U airflow"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # ============================================================================
-  # AIRFLOW DB INIT (One-time setup)
-  # ============================================================================
-  airflow-init:
-    image: apache/airflow:2.8.4
-    container_name: airflow-init
-    depends_on:
-      airflow-postgres:
-        condition: service_healthy
-    environment:
-      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
-      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
-      - AIRFLOW__CORE__FERNET_KEY=
-      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=true
-      - AIRFLOW__CORE__LOAD_EXAMPLES=false
-      - _AIRFLOW_WWW_USER_CREATE=true
-      - _AIRFLOW_WWW_USER_USERNAME=admin
-      - _AIRFLOW_WWW_USER_PASSWORD=admin
-    volumes:
-      - ./airflow/dags:/opt/airflow/dags
-      - ./airflow/logs:/opt/airflow/logs
-      - ./airflow/plugins:/opt/airflow/plugins
-      - ./airflow-init.sh:/airflow-init.sh
-      - airflow-init-marker:/opt/airflow
-    entrypoint: /bin/bash
-    command: /airflow-init.sh
-    restart: "no"
-
-  # ============================================================================
-  # AIRFLOW WEBSERVER
-  # ============================================================================
-  airflow-webserver:
-    image: apache/airflow:2.8.4
-    container_name: airflow-webserver
-    depends_on:
-      airflow-postgres:
-        condition: service_healthy
-      airflow-init:
-        condition: service_completed_successfully
-    ports:
-      - "8081:8080"
-    environment:
-      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
-      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
-      - AIRFLOW__CORE__FERNET_KEY=
-      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=true
-      - AIRFLOW__CORE__LOAD_EXAMPLES=false
-      - AIRFLOW__API__AUTH_BACKENDS=airflow.api.auth.backend.basic_auth
-      - _AIRFLOW_WWW_USER_CREATE=true
-      - _AIRFLOW_WWW_USER_USERNAME=admin
-      - _AIRFLOW_WWW_USER_PASSWORD=admin
-    volumes:
-      - ./airflow/dags:/opt/airflow/dags
-      - ./airflow/logs:/opt/airflow/logs
-      - ./airflow/plugins:/opt/airflow/plugins
-      - airflow-init-marker:/opt/airflow
-    command: webserver
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:29092", "--list"]
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 30s
 
-  # ============================================================================
-  # AIRFLOW SCHEDULER
-  # ============================================================================
-  airflow-scheduler:
-    image: apache/airflow:2.8.4
-    container_name: airflow-scheduler
+  kafka-2:
+    image: confluentinc/cp-kafka:7.6.1
+    hostname: kafka-2
+    container_name: kafka-2
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9093:9093"
+    environment:
+      KAFKA_BROKER_ID: 2
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:29093,PLAINTEXT_HOST://localhost:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 2
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      KAFKA_NUM_PARTITIONS: 12
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_COMPRESSION_TYPE: zstd
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    volumes:
+      - kafka2-data:/var/lib/kafka/data
+    networks:
+      - ecom-net
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:29093", "--list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # One-shot container: creates the three pipeline topics on first boot
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: kafka-init
+    depends_on:
+      kafka-1:
+        condition: service_healthy
+      kafka-2:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        echo "Creating pipeline topics..."
+
+        kafka-topics --bootstrap-server kafka-1:29092 \
+          --create --if-not-exists \
+          --topic ecommerce.events.raw.v1 \
+          --partitions 12 --replication-factor 2 \
+          --config retention.ms=604800000 \
+          --config compression.type=zstd \
+          --config cleanup.policy=delete
+
+        kafka-topics --bootstrap-server kafka-1:29092 \
+          --create --if-not-exists \
+          --topic ecommerce.events.clean.v1 \
+          --partitions 12 --replication-factor 2 \
+          --config retention.ms=604800000 \
+          --config compression.type=zstd \
+          --config cleanup.policy=delete
+
+        kafka-topics --bootstrap-server kafka-1:29092 \
+          --create --if-not-exists \
+          --topic dlq.events \
+          --partitions 4 --replication-factor 2 \
+          --config retention.ms=604800000 \
+          --config cleanup.policy=delete
+
+        echo "Topics ready:"
+        kafka-topics --bootstrap-server kafka-1:29092 --list
+    networks:
+      - ecom-net
+
+  # =========================================================================
+  # SCHEMA REGISTRY
+  # UI via Kafka UI (port 8085) and Landoop UI (port 8081)
+  # =========================================================================
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.6.1
+    hostname: schema-registry
+    container_name: schema-registry
+    depends_on:
+      kafka-1:
+        condition: service_healthy
+      kafka-2:
+        condition: service_healthy
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: *kafka-brokers
+      SCHEMA_REGISTRY_LISTENERS: "http://0.0.0.0:8081"
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: 2
+      SCHEMA_REGISTRY_SCHEMA_COMPATIBILITY_LEVEL: FULL_TRANSITIVE
+      SCHEMA_REGISTRY_KAFKASTORE_TIMEOUT_MS: "60000"
+      SCHEMA_REGISTRY_KAFKASTORE_INIT_TIMEOUT_MS: "120000"
+    ports:
+      - "8081:8081"
+    restart: unless-stopped
+    networks:
+      - ecom-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/subjects || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+
+  # Schema Registry UI — http://localhost:8081
+  schema-registry-ui:
+    image: landoop/schema-registry-ui:latest
+    container_name: schema-registry-ui
+    depends_on:
+      schema-registry:
+        condition: service_healthy
+    ports:
+      - "8086:8000"
+    environment:
+      SCHEMAREGISTRY_URL: "http://schema-registry:8081"
+      PROXY: "true"
+    networks:
+      - ecom-net
+
+  # =========================================================================
+  # KAFKA UI — http://localhost:8085
+  # Covers: brokers · topics · consumer groups · schema registry · connect
+  # =========================================================================
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      schema-registry:
+        condition: service_healthy
+    ports:
+      - "8085:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: ecom-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: *kafka-brokers
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: "http://schema-registry:8081"
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: ecom-connect
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: "http://kafka-connect:8083"
+    networks:
+      - ecom-net
+
+  # =========================================================================
+  # KAFKA CONNECT — Iceberg sink host
+  # REST API → http://localhost:8083  (also visible inside Kafka UI)
+  # =========================================================================
+  kafka-connect:
+    image: confluentinc/cp-kafka-connect:7.6.1
+    hostname: kafka-connect
+    container_name: kafka-connect
+    depends_on:
+      schema-registry:
+        condition: service_healthy
+    ports:
+      - "8083:8083"
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: *kafka-brokers
+      CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect
+      CONNECT_REST_PORT: 8083
+      CONNECT_GROUP_ID: ecom-connect-group
+      CONNECT_CONFIG_STORAGE_TOPIC: _connect-configs
+      CONNECT_OFFSET_STORAGE_TOPIC: _connect-offsets
+      CONNECT_STATUS_STORAGE_TOPIC: _connect-status
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 2
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 2
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 2
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.storage.StringConverter
+      CONNECT_VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+      CONNECT_PLUGIN_PATH: "/usr/share/java,/usr/share/confluent-hub-components,/connectors"
+      CONNECT_LOG4J_ROOT_LOGLEVEL: WARN
+    volumes:
+      - ../kafka-connect:/connectors
+    networks:
+      - ecom-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # =========================================================================
+  # APACHE FLINK 1.19
+  # Job Manager UI → http://localhost:8082
+  # 4 Task Managers × 8 slots = 32 total slots
+  # Checkpoints → MinIO  s3://flink-ckpt/ecom/
+  # Savepoints  → MinIO  s3://flink-savepoints/ecom/
+  # =========================================================================
+  flink-jobmanager:
+    image: flink:1.19-java17
+    hostname: flink-jobmanager
+    container_name: flink-jobmanager
+    command: jobmanager
+    ports:
+      - "8082:8081"
+    environment:
+      <<: *flink-env
+    volumes:
+      - ../flink-app:/opt/flink/usrlib
+    networks:
+      - ecom-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/overview || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  flink-taskmanager-1:
+    <<: *flink-taskmanager
+    hostname: flink-taskmanager-1
+    container_name: flink-taskmanager-1
+
+  flink-taskmanager-2:
+    <<: *flink-taskmanager
+    hostname: flink-taskmanager-2
+    container_name: flink-taskmanager-2
+
+  # =========================================================================
+  # APACHE DRUID 36 — real-time OLAP
+  # Router / Console UI → http://localhost:8088
+  # =========================================================================
+  druid-postgres:
+    image: postgres:15-alpine
+    hostname: druid-postgres
+    container_name: druid-postgres
+    environment:
+      POSTGRES_DB: druid
+      POSTGRES_USER: druid
+      POSTGRES_PASSWORD: druid
+    volumes:
+      - druid-postgres-data:/var/lib/postgresql/data
+    networks:
+      - ecom-net
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "druid"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  druid-coordinator:
+    <<: *druid-common
+    hostname: druid-coordinator
+    container_name: druid-coordinator
+    command: ["coordinator"]
+    volumes:
+      - druid-data:/opt/shared
+      - druid-coordinator-var:/opt/druid/var
+
+  druid-broker:
+    <<: *druid-common
+    hostname: druid-broker
+    container_name: druid-broker
+    command: ["broker"]
+    depends_on:
+      - druid-coordinator
+    volumes:
+      - druid-broker-var:/opt/druid/var
+
+  druid-historical:
+    <<: *druid-common
+    hostname: druid-historical
+    container_name: druid-historical
+    command: ["historical"]
+    depends_on:
+      - druid-coordinator
+    volumes:
+      - druid-data:/opt/shared
+      - druid-historical-var:/opt/druid/var
+
+  druid-middlemanager:
+    <<: *druid-common
+    hostname: druid-middlemanager
+    container_name: druid-middlemanager
+    command: ["middleManager"]
+    depends_on:
+      - druid-coordinator
+    volumes:
+      - druid-data:/opt/shared
+      - druid-middlemanager-var:/opt/druid/var
+
+  druid-router:
+    <<: *druid-common
+    hostname: druid-router
+    container_name: druid-router
+    command: ["router"]
+    depends_on:
+      - druid-coordinator
+      - druid-broker
+    ports:
+      - "8888:8888"
+    volumes:
+      - druid-router-var:/opt/druid/var
+
+  # =========================================================================
+  # CLICKHOUSE 24 — historical OLAP
+  # HTTP / Play UI → http://localhost:8123/play
+  # ch-ui          → http://localhost:8124
+  # =========================================================================
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    hostname: clickhouse
+    container_name: clickhouse
+    ports:
+      - "8123:8123"
+    environment:
+      CLICKHOUSE_DB: ecom
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ../clickhouse:/docker-entrypoint-initdb.d
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    networks:
+      - ecom-net
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ClickHouse management UI — http://localhost:8124
+  clickhouse-ui:
+    image: ghcr.io/caioricciuti/ch-ui:latest
+    container_name: clickhouse-ui
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    ports:
+      - "8124:5521"
+    environment:
+      VITE_CLICKHOUSE_URL: "http://localhost:8123"
+      VITE_CLICKHOUSE_USER: default
+      VITE_CLICKHOUSE_PASSWORD: ""
+    networks:
+      - ecom-net
+
+  # =========================================================================
+  # MINIO — S3-compatible object store
+  # Console → http://localhost:9001  (minioadmin / minioadmin)
+  # API     → localhost:9000         (used internally by Flink & Iceberg)
+  # =========================================================================
+  minio:
+    image: minio/minio:latest
+    hostname: minio
+    container_name: minio
+    ports:
+      - "9002:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    networks:
+      - ecom-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Creates buckets on first boot
+  minio-setup:
+    image: minio/mc:latest
+    container_name: minio-setup
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        mc alias set local http://minio:9000 minioadmin minioadmin
+        mc mb local/flink-ckpt         --ignore-existing
+        mc mb local/flink-savepoints   --ignore-existing
+        mc mb local/iceberg-warehouse  --ignore-existing
+        echo "MinIO buckets ready."
+    networks:
+      - ecom-net
+
+  # =========================================================================
+  # ICEBERG REST CATALOG — http://localhost:8181
+  # =========================================================================
+  iceberg-rest:
+    image: tabulario/iceberg-rest:0.10.0
+    hostname: iceberg-rest
+    container_name: iceberg-rest
+    depends_on:
+      minio:
+        condition: service_healthy
+    ports:
+      - "8181:8181"
+    environment:
+      CATALOG_WAREHOUSE: s3://iceberg-warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_ACCESS__KEY__ID: minioadmin
+      CATALOG_S3_SECRET__ACCESS__KEY: minioadmin
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+    networks:
+      - ecom-net
+
+  # =========================================================================
+  # APACHE AIRFLOW 2.9 — orchestration
+  # Web UI → http://localhost:8080  (admin / admin)
+  # DAGs: iceberg_compaction · dq_great_expectations · gdpr_right_to_forget
+  #       flink_savepoint_rotation
+  # =========================================================================
+  airflow-postgres:
+    image: postgres:15-alpine
+    hostname: airflow-postgres
+    container_name: airflow-postgres
+    environment:
+      POSTGRES_DB: airflow
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+    volumes:
+      - airflow-postgres-data:/var/lib/postgresql/data
+    networks:
+      - ecom-net
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  airflow-redis:
+    image: redis:7-alpine
+    hostname: airflow-redis
+    container_name: airflow-redis
+    networks:
+      - ecom-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        airflow db migrate
+        airflow users create \
+          --username admin --password admin \
+          --firstname Admin --lastname Admin \
+          --role Admin --email admin@example.com
+    restart: on-failure
+
+  airflow-webserver:
+    <<: *airflow-common
+    hostname: airflow-webserver
+    container_name: airflow-webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@airflow-postgres/airflow
+      AIRFLOW__CELERY__BROKER_URL: redis://:@airflow-redis:6379/0
+      AIRFLOW__CORE__FERNET_KEY: "RiZ4PqTCKGR0DvOlR0yB6MJwxaO_6yJ9R8J2v5fXdoI="
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session"
+      AIRFLOW__WEBSERVER__SECRET_KEY: "ecom-pipeline-secret"
+      AIRFLOW__WEBSERVER__WORKERS: "2"
+      GUNICORN_CMD_ARGS: "--timeout 300 --workers 2"
     depends_on:
       airflow-postgres:
         condition: service_healthy
+      airflow-redis:
+        condition: service_healthy
       airflow-init:
         condition: service_completed_successfully
-    environment:
-      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
-      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
-      - AIRFLOW__CORE__FERNET_KEY=
-      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=true
-      - AIRFLOW__CORE__LOAD_EXAMPLES=false
-    volumes:
-      - ./airflow/dags:/opt/airflow/dags
-      - ./airflow/logs:/opt/airflow/logs
-      - ./airflow/plugins:/opt/airflow/plugins
-      - airflow-init-marker:/opt/airflow
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 10
+
+  airflow-scheduler:
+    <<: *airflow-common
+    hostname: airflow-scheduler
+    container_name: airflow-scheduler
     command: scheduler
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-redis:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
 
-volumes:
-  zookeeper-data:
-  zookeeper-logs:
-  kafka-data:
-  namenode-data:
-  datanode-data:
-  postgres-data:
-  druid-coordinator-data:
-  druid-broker-data:
-  druid-historical-data:
-  druid-middlemanager-data:
-  druid-router-data:
-  spark-master-data:
-  spark-worker-1-data:
-  spark-worker-2-data:
-  airflow-postgres-data:
-  airflow-init-marker:
+  airflow-worker:
+    <<: *airflow-common
+    hostname: airflow-worker
+    container_name: airflow-worker
+    command: celery worker
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-redis:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
 
-networks:
-  default:
-    name: ecommerce-network
+  # =========================================================================
+  # ELK STACK 8.13 — single-pane observability
+  # Kibana → http://localhost:5601
+  # =========================================================================
+  elasticsearch:
+    image: elastic/elasticsearch:8.17.0
+    hostname: elasticsearch
+    container_name: elasticsearch
+    ports:
+      - "9200:9200"
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      bootstrap.memory_lock: "true"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    networks:
+      - ecom-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health?wait_for_status=yellow || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+
+  logstash:
+    image: elastic/logstash:8.17.0
+    hostname: logstash
+    container_name: logstash
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    ports:
+      - "5044:5044"
+      - "9600:9600"
+    environment:
+      LS_JAVA_OPTS: "-Xms256m -Xmx256m"
+    volumes:
+      - ../elk/logstash-pipelines:/usr/share/logstash/pipeline:ro
+    networks:
+      - ecom-net
+
+  # Kibana — http://localhost:5601
+  kibana:
+    image: elastic/kibana:8.17.0
+    hostname: kibana
+    container_name: kibana
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    ports:
+      - "5601:5601"
+    environment:
+      ELASTICSEARCH_HOSTS: '["http://elasticsearch:9200"]'
+      XPACK_SECURITY_ENABLED: "false"
+    networks:
+      - ecom-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:5601/api/status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+
+  # Filebeat — collects stdout/stderr from all containers
+  filebeat:
+    image: elastic/filebeat:8.17.0
+    hostname: filebeat
+    container_name: filebeat
+    user: root
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    command: filebeat -e --strict.perms=false
+    environment:
+      ELASTICSEARCH_HOST: "http://elasticsearch:9200"
+      KIBANA_HOST: "http://kibana:5601"
+    volumes:
+      - ../elk/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - ecom-net
+
+  # Metricbeat — system, docker, jvm, kafka JMX, clickhouse, Flink REST
+  metricbeat:
+    image: elastic/metricbeat:8.17.0
+    hostname: metricbeat
+    container_name: metricbeat
+    user: root
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    command: metricbeat -e --strict.perms=false
+    environment:
+      ELASTICSEARCH_HOST: "http://elasticsearch:9200"
+      KIBANA_HOST: "http://kibana:5601"
+    volumes:
+      - ../elk/metricbeat.yml:/usr/share/metricbeat/metricbeat.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /sys/fs/cgroup:/hostfs/sys/fs/cgroup:ro
+      - /proc:/hostfs/proc:ro
+      - /:/hostfs:ro
+    networks:
+      - ecom-net
+
+  # Heartbeat — synthetic checks: Druid SQL, CH, Flink JM, consumer lag
+  heartbeat:
+    image: elastic/heartbeat:8.17.0
+    hostname: heartbeat
+    container_name: heartbeat
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    command: heartbeat -e --strict.perms=false
+    environment:
+      ELASTICSEARCH_HOST: "http://elasticsearch:9200"
+      KIBANA_HOST: "http://kibana:5601"
+    volumes:
+      - ../elk/heartbeat.yml:/usr/share/heartbeat/heartbeat.yml:ro
+    networks:
+      - ecom-net

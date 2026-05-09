@@ -1,0 +1,54 @@
+heartbeat.monitors:
+  - type: http
+    id: flink-jobmanager
+    name: "Flink Job Manager"
+    urls: ["http://flink-jobmanager:8081/overview"]
+    schedule: "@every 30s"
+
+  - type: http
+    id: kafka-connect
+    name: "Kafka Connect"
+    urls: ["http://kafka-connect:8083/"]
+    schedule: "@every 30s"
+
+  - type: http
+    id: schema-registry
+    name: "Schema Registry"
+    urls: ["http://schema-registry:8081/subjects"]
+    schedule: "@every 30s"
+
+  - type: http
+    id: druid-router
+    name: "Druid Router"
+    urls: ["http://druid-router:8888/status"]
+    schedule: "@every 30s"
+
+  - type: http
+    id: clickhouse
+    name: "ClickHouse"
+    urls: ["http://clickhouse:8123/ping"]
+    schedule: "@every 30s"
+
+  - type: http
+    id: minio
+    name: "MinIO"
+    urls: ["http://minio:9000/minio/health/live"]
+    schedule: "@every 30s"
+
+  - type: http
+    id: iceberg-rest
+    name: "Iceberg REST Catalog"
+    urls: ["http://iceberg-rest:8181/v1/config"]
+    schedule: "@every 30s"
+
+output.elasticsearch:
+  hosts: ["${ELASTICSEARCH_HOST}"]
+  index: "heartbeat-%{+YYYY.MM.dd}"
+
+setup.kibana:
+  host: "${KIBANA_HOST}"
+
+setup.template.name: "heartbeat"
+setup.template.pattern: "heartbeat-*"
+
+logging.level: warning

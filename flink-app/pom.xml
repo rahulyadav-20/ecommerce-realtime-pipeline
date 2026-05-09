@@ -1,0 +1,437 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             https://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+    <modelVersion>4.0.0</modelVersion>
+
+    <!-- ================================================================
+         Project identity
+         ================================================================ -->
+    <groupId>com.ecom</groupId>
+    <artifactId>ecom-streaming-etl</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+
+    <name>E-Commerce Streaming ETL</name>
+    <description>
+        Flink 1.19 job: validate, deduplicate, and clean e-commerce clickstream
+        events from Kafka → Kafka hub topic (ecommerce.events.clean.v1).
+        Bad records are routed to a DLQ side output.
+    </description>
+
+    <!-- ================================================================
+         Global properties
+         ================================================================ -->
+    <properties>
+        <!-- Java -->
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+        <!-- Core versions -->
+        <flink.version>1.19.0</flink.version>
+        <kafka.version>3.7.0</kafka.version>
+        <avro.version>1.11.3</avro.version>
+        <confluent.version>7.6.0</confluent.version>   <!-- must match Schema Registry -->
+        <slf4j.version>1.7.36</slf4j.version>
+        <log4j.version>2.17.2</log4j.version>
+        <junit.version>5.10.2</junit.version>
+        <assertj.version>3.25.3</assertj.version>
+        <mockito.version>5.11.0</mockito.version>
+
+        <!-- Build -->
+        <shade.plugin.version>3.5.3</shade.plugin.version>
+        <compiler.plugin.version>3.13.0</compiler.plugin.version>
+        <surefire.plugin.version>3.2.5</surefire.plugin.version>
+
+        <!--
+          Fat-JAR main class — the entry point Flink will call.
+          Override on command line: -Dmain.class=com.ecom.etl.EcomEtlJob
+        -->
+        <main.class>com.ecom.etl.EcomEtlJob</main.class>
+    </properties>
+
+    <!-- ================================================================
+         Force ALL Confluent transitive deps to 7.6.0.
+         flink-avro-confluent-registry:1.19.0 pulls kafka-schema-registry-client:7.2.2
+         which is no longer publicly downloadable. This BOM-style override
+         ensures Maven uses the 7.6.0 JARs we have cached locally.
+         ================================================================ -->
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>io.confluent</groupId>
+                <artifactId>kafka-schema-registry-client</artifactId>
+                <version>${confluent.version}</version>   <!-- 7.6.0 -->
+            </dependency>
+            <dependency>
+                <groupId>io.confluent</groupId>
+                <artifactId>common-utils</artifactId>
+                <version>${confluent.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.confluent</groupId>
+                <artifactId>common-config</artifactId>
+                <version>${confluent.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <!-- ================================================================
+         Confluent Schema Registry Maven repository
+         (not mirrored on Maven Central)
+         ================================================================ -->
+    <repositories>
+        <repository>
+            <id>confluent</id>
+            <name>Confluent</name>
+            <url>https://packages.confluent.io/maven/</url>
+            <releases><enabled>true</enabled></releases>
+            <snapshots><enabled>false</enabled></snapshots>
+        </repository>
+    </repositories>
+
+    <!-- ================================================================
+         Dependencies
+         ================================================================ -->
+    <dependencies>
+
+        <!-- ── Flink streaming core ────────────────────────────────────
+             Scope = provided: Flink cluster supplies these at runtime.
+             They are NOT bundled into the fat JAR to avoid version conflicts.
+             For local IDE runs use a test-scoped Flink mini-cluster instead.
+             ──────────────────────────────────────────────────────────── -->
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-streaming-java</artifactId>
+            <version>${flink.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-clients</artifactId>
+            <version>${flink.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- Flink Java API (DataStream) -->
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-java</artifactId>
+            <version>${flink.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- ── Flink connector base (contains DeliveryGuarantee) ──────
+             Provided by the Flink cluster; needed on compile classpath.
+             ──────────────────────────────────────────────────────────── -->
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-connector-base</artifactId>
+            <version>${flink.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- ── Kafka connector ─────────────────────────────────────────
+             Bundled (compile scope) — not present on the Flink cluster image.
+             Uses KafkaSource / KafkaSink (new unified Source/Sink API).
+             ──────────────────────────────────────────────────────────── -->
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-connector-kafka</artifactId>
+            <version>3.2.0-1.19</version>   <!-- connector versioned separately from Flink -->
+        </dependency>
+
+        <!-- ── Avro + Confluent Schema Registry ────────────────────────
+             ConfluentRegistryAvroDeserializationSchema /
+             ConfluentRegistryAvroSerializationSchema are provided by
+             flink-avro-confluent-registry. Both bundled into the fat JAR.
+             ──────────────────────────────────────────────────────────── -->
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-avro-confluent-registry</artifactId>
+            <version>${flink.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.avro</groupId>
+            <artifactId>avro</artifactId>
+            <version>${avro.version}</version>
+        </dependency>
+
+        <!-- Confluent Schema Registry client (pulled transitively but pinned) -->
+        <dependency>
+            <groupId>io.confluent</groupId>
+            <artifactId>kafka-schema-registry-client</artifactId>
+            <version>${confluent.version}</version>
+            <exclusions>
+                <!-- Exclude Kafka clients pulled by the SR client; we use the one
+                     coming from flink-connector-kafka to avoid classpath conflicts. -->
+                <exclusion>
+                    <groupId>org.apache.kafka</groupId>
+                    <artifactId>kafka-clients</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <!-- ── RocksDB state backend ────────────────────────────────────
+             Used for incremental checkpoints of the 2-hour dedup window.
+             Bundled because the Flink image may not have this by default.
+             ──────────────────────────────────────────────────────────── -->
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-statebackend-rocksdb</artifactId>
+            <version>${flink.version}</version>
+        </dependency>
+
+        <!-- ── Logging ─────────────────────────────────────────────────
+             SLF4J API is provided by the Flink cluster (scope=provided).
+             For local test runs we add slf4j-simple as test dependency.
+             ──────────────────────────────────────────────────────────── -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>${slf4j.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- Log4j2 binding — matches what Flink ships; compile-scoped so it
+             ends up in the fat JAR and works without the cluster's log config. -->
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-slf4j-impl</artifactId>
+            <version>${log4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-api</artifactId>
+            <version>${log4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-core</artifactId>
+            <version>${log4j.version}</version>
+        </dependency>
+
+        <!-- ── Test dependencies ───────────────────────────────────────
+             flink-test-utils      → MiniCluster, TestLogger
+             flink-streaming-java tests → ProcessFunctionTestHarnesses,
+               OneInputStreamOperatorTestHarness, TestHarnessUtil
+             flink-runtime tests   → TestTaskStateManager, RpcUtils
+             ──────────────────────────────────────────────────────────── -->
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-test-utils</artifactId>
+            <version>${flink.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- ProcessFunctionTestHarnesses lives in the -tests jar -->
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-streaming-java</artifactId>
+            <version>${flink.version}</version>
+            <classifier>tests</classifier>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-runtime</artifactId>
+            <version>${flink.version}</version>
+            <classifier>tests</classifier>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>${assertj.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <version>${mockito.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>${slf4j.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+    </dependencies>
+
+    <!-- ================================================================
+         Build
+         ================================================================ -->
+    <build>
+        <plugins>
+
+            <!-- ── Java 17 compiler ──────────────────────────────────── -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>${compiler.plugin.version}</version>
+                <configuration>
+                    <source>17</source>
+                    <target>17</target>
+                    <compilerArgs>
+                        <!-- Warn on unchecked generics operations -->
+                        <arg>-Xlint:unchecked</arg>
+                        <arg>-Xlint:deprecation</arg>
+                    </compilerArgs>
+                </configuration>
+            </plugin>
+
+            <!-- ── Avro code generation ──────────────────────────────── -->
+            <!--
+                Generates Java SpecificRecord classes from .avsc files
+                placed in src/main/avro/. The generated sources land in
+                target/generated-sources/avro/ and are automatically
+                added to the compile source root.
+            -->
+            <plugin>
+                <groupId>org.apache.avro</groupId>
+                <artifactId>avro-maven-plugin</artifactId>
+                <version>${avro.version}</version>
+                <executions>
+                    <execution>
+                        <id>generate-avro-sources</id>
+                        <phase>generate-sources</phase>
+                        <goals><goal>schema</goal></goals>
+                        <configuration>
+                            <sourceDirectory>${project.basedir}/src/main/avro</sourceDirectory>
+                            <outputDirectory>${project.build.directory}/generated-sources/avro</outputDirectory>
+                            <stringType>String</stringType>   <!-- use java.lang.String, not Utf8 -->
+                            <enableDecimalLogicalType>true</enableDecimalLogicalType>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- ── Surefire (JUnit 5) ────────────────────────────────── -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>${surefire.plugin.version}</version>
+                <configuration>
+                    <!-- JUnit 5 platform -->
+                    <useModulePath>false</useModulePath>
+                    <argLine>
+                        --add-opens java.base/java.util=ALL-UNNAMED
+                        --add-opens java.base/java.lang=ALL-UNNAMED
+                    </argLine>
+                </configuration>
+            </plugin>
+
+            <!-- ── maven-shade-plugin: fat / über JAR ───────────────────
+                 Bundles all compile-scope deps into one JAR.
+                 Flink-provided jars (scope=provided) are excluded automatically.
+
+                 Build:
+                   mvn clean package -DskipTests
+                   → target/ecom-streaming-etl-1.0-SNAPSHOT.jar  (fat JAR)
+                 ──────────────────────────────────────────────────────── -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>${shade.plugin.version}</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals><goal>shade</goal></goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <!-- Strip signatures — they become invalid in a fat JAR -->
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                        <exclude>module-info.class</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+
+                            <transformers>
+                                <!-- Merge SPI registrations so all format factories are discoverable -->
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                                <!-- Set the Flink job entry point -->
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>${main.class}</mainClass>
+                                </transformer>
+                                <!-- Deduplicate Apache LICENSE / NOTICE files -->
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ApacheLicenseResourceTransformer"/>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ApacheNoticeResourceTransformer">
+                                    <addHeader>false</addHeader>
+                                </transformer>
+                            </transformers>
+
+                            <!--
+                                No Avro/Jackson relocation: flink-avro-confluent-registry
+                                expects classes at their original package paths. Relocating
+                                Avro breaks the schema-registry deserialization schemas.
+                            -->
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+        </plugins>
+    </build>
+
+    <!-- ================================================================
+         Profiles
+         ================================================================ -->
+    <profiles>
+
+        <!--
+            local-run: adds Flink runtime on the classpath so you can
+            run EcomEtlJob directly from your IDE or via:
+              mvn exec:java -Plocal-run -Dexec.mainClass=com.ecom.etl.EcomEtlJob
+        -->
+        <profile>
+            <id>local-run</id>
+            <dependencies>
+                <dependency>
+                    <groupId>org.apache.flink</groupId>
+                    <artifactId>flink-streaming-java</artifactId>
+                    <version>${flink.version}</version>
+                    <scope>compile</scope>  <!-- override provided -->
+                </dependency>
+                <dependency>
+                    <groupId>org.apache.flink</groupId>
+                    <artifactId>flink-clients</artifactId>
+                    <version>${flink.version}</version>
+                    <scope>compile</scope>
+                </dependency>
+                <dependency>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-api</artifactId>
+                    <version>${slf4j.version}</version>
+                    <scope>compile</scope>
+                </dependency>
+            </dependencies>
+        </profile>
+
+    </profiles>
+
+</project>

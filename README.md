@@ -1,383 +1,845 @@
 # Real-Time E-Commerce Analytics Pipeline
 
-## 🏗️ System Architecture
+## Contents
 
-### Architecture Overview
+1. [Executive Summary](#-1-executive-summary)
+2. [Architecture Overview](#-2-architecture-overview)
+3. [Design Principles](#-3-design-principles)
+4. [Data Flow & Topology](#-4-data-flow--topology)
+5. [Event Schema (Avro)](#-5-event-schema-avro)
+6. [Flink ETL Job](#-6-flink-etl-job)
+7. [Kafka Hub Topic](#-7-kafka-hub-topic)
+8. [Druid — Real-time OLAP](#-8-druid--real-time-olap)
+9. [ClickHouse — Historical OLAP](#-9-clickhouse--historical-olap)
+10. [Iceberg via Kafka Connect](#-10-iceberg-via-kafka-connect)
+11. [ELK Observability](#-11-elk-observability)
+12. [Airflow Orchestration](#-12-airflow-orchestration)
+13. [Operations & Replay](#-13-operations--replay)
+14. [Performance Targets](#-14-performance-targets)
+15. [Project Structure & Quick Start](#-15-project-structure--quick-start)
+
+---
+
+# Part I — Foundations
+
+> What this pipeline does, why it's designed the way it is, and how data flows from the e-commerce edge to analytics.
+
+## § 1 Executive Summary
+
+This pipeline ingests live e-commerce events — product views, cart actions, orders, payments — and makes them queryable across three analytical surfaces within seconds:
+
+- **Apache Druid** for sub-second dashboard queries on the most recent days of data
+- **ClickHouse** for ad-hoc SQL across full history with rich materialized views
+- **Apache Iceberg** as the lakehouse system of record, queryable via Trino or Spark for batch and ML workloads
+
+Apache Flink sits between the raw event stream and these three systems, but its job is intentionally narrow: **validate, deduplicate, and clean**. All aggregation work is pushed down to Druid (rollup at ingestion) and ClickHouse (materialized views) — the engines that already optimize for it.
+
+> **🔑 Key Takeaway**
+>
+> One Flink job. One Kafka hub topic. Three independent sinks. No redundant aggregation logic. Replay any sink by resetting its consumer group — no backfill DAG required.
+
+---
+
+## § 2 Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         E-Commerce Application                          │
-│                    (Product Views, Orders, Payments)                    │
-└────────────────────────────┬────────────────────────────────────────────┘
-                             │
-                             ▼
-                    ┌────────────────┐
-                    │  Apache Kafka  │
-                    │  (Event Topic) │
-                    └────────┬───────┘
-                             │
-                             ▼
-              ┌──────────────────────────────┐
-              │   PySpark Structured Stream  │
-              │   - Schema Enforcement       │
-              │   - Deduplication            │
-              │   - Watermarking             │
-              │   - Event Transformation     │
-              └─────┬────────────────────┬───┘
-                    │                    │
-        ┌───────────▼──────────┐    ┌───▼──────────────┐
-        │   Bronze Layer       │    │  Silver Layer    │
-        │   (Raw Events)       │    │  (Cleaned Data)  │
-        │   HDFS/S3 Parquet    │    │  Hive/Iceberg    │
-        └──────────────────────┘    └──────────────────┘
-                    │
-                    │ Window Aggregations (5-min)
-                    │
-                    ▼
-        ┌─────────────────────────┐
-        │    Gold Layer           │
-        │    Apache Druid         │
-        │    (Real-time OLAP)     │
-        └────────┬────────────────┘
+┌────────────────────────────────────┐
+│   E-Commerce Microservices         │
+│   (web, mobile, order, payment)    │
+└─────────────────┬──────────────────┘
+                  │ Avro events
+                  ▼
+        ┌──────────────────┐
+        │      KAFKA       │
+        │  ecommerce.      │
+        │  events.raw.v1   │
+        └────────┬─────────┘
                  │
                  ▼
-        ┌─────────────────┐
-        │  BI Dashboards  │
-        │  Superset/      │
-        │  Grafana/Pivot  │
-        └─────────────────┘
+   ┌──────────────────────────────┐
+   │       APACHE FLINK 1.19      │
+   │       (ETL only)             │
+   │                              │
+   │   1. Avro schema validation  │
+   │   2. Deduplication (event_id)│
+   │   3. Field-level cleaning    │
+   │   4. Bad records → DLQ       │
+   │                              │
+   │   Scope: ETL only            │
+   │   (no aggregation/joins)     │
+   └──────────────┬───────────────┘
+                  │
+                  ▼
+        ┌──────────────────┐
+        │      KAFKA       │
+        │  ecommerce.      │
+        │  events.clean.v1 │ ◄── single hub topic
+        └────┬────┬────┬───┘
+             │    │    │
+   ┌─────────┘    │    └──────────────┐
+   │              │                   │
+   ▼              ▼                   ▼
+┌────────┐   ┌────────────┐   ┌────────────────┐
+│ DRUID  │   │ CLICKHOUSE │   │ KAFKA CONNECT  │
+│ Kafka  │   │ Kafka      │   │ Iceberg Sink   │
+│ Index  │   │ Engine + MV│   │ → MinIO/S3     │
+│ rollup │   │ MV-based   │   │                │
+│ at     │   │ aggregation│   │                │
+│ ingest │   │            │   │                │
+└───┬────┘   └─────┬──────┘   └────────┬───────┘
+    │              │                   │
+    ▼              ▼                   ▼
+ Superset     Metabase /          Trino / Spark
+ (live <1s)   Grafana             (ad-hoc, batch)
+              (full history)
+                                       ▲
+                                       │
+                              ┌────────┴───────┐
+                              │  AIRFLOW 2.9   │
+                              │  - compaction  │
+                              │  - DQ checks   │
+                              │  - GDPR        │
+                              │  - savepoints  │
+                              └────────────────┘
+
+══════════════ MONITORING (ELK) ══════════════
+   Filebeat ─► Logstash ─► Elasticsearch ─► Kibana
+   Metricbeat ──────────►       ▲
+   Watcher / ElastAlert ──► Slack / PagerDuty
 ```
 
-### Data Flow
+_Figure 2.1 — End-to-end architecture: one Flink ETL job, one Kafka hub topic, three independent consumers._
 
-1. **Ingestion Layer**: Kafka receives JSON events from e-commerce microservices
-2. **Processing Layer**: PySpark Structured Streaming processes events in micro-batches
-3. **Bronze Layer**: Raw events stored as-is in HDFS/S3 (Parquet format)
-4. **Silver Layer**: Cleaned, deduplicated data stored in Hive/Iceberg tables
-5. **Gold Layer**: Aggregated metrics pushed to Apache Druid for OLAP queries
-6. **Orchestration**: Airflow manages backfills and monitoring
+### Component Roles
 
-### Key Design Decisions
+| Component             | Role                          | What It Owns                                                 |
+| --------------------- | ----------------------------- | ------------------------------------------------------------ |
+| **Kafka (raw)**       | Source of truth for events    | Producer-side delivery guarantees, schema-versioned messages |
+| **Flink**             | ETL — validate, dedupe, clean | Schema validation, dedup state (RocksDB), DLQ routing        |
+| **Kafka (clean hub)** | Decoupling fan-out            | Single contract for all downstream consumers                 |
+| **Druid**             | Real-time OLAP                | Rollup-time aggregations, sub-second queries on hot data     |
+| **ClickHouse**        | Historical OLAP               | Materialized-view aggregations, full-history ad-hoc          |
+| **Iceberg**           | Lakehouse / SOR               | Time travel, schema evolution, batch/ML access               |
+| **Kafka Connect**     | Iceberg writer                | Centralized small-file commits, exactly-once                 |
+| **Airflow**           | Orchestration                 | Compaction, DQ, GDPR, savepoint rotation                     |
+| **ELK**               | Observability                 | Logs, metrics, alerts, dashboards                            |
 
-#### 1. **Lambda vs Kappa Architecture**
-- **Chosen**: Modified Kappa Architecture
-- **Rationale**: Single processing path with batch reprocessing capability via Airflow
-- **Benefits**: Simplified code maintenance, consistent logic
+---
 
-#### 2. **Deduplication Strategy**
-- **Approach**: Event ID-based deduplication using `dropDuplicates()`
-- **Watermark**: 30-minute late data tolerance
-- **Trade-off**: Balance between completeness and latency
+## § 3 Design Principles
 
-#### 3. **Storage Format**
-- **Bronze**: Parquet (columnar, compression, schema evolution)
-- **Silver**: Iceberg (ACID transactions, time travel, schema evolution)
-- **Rationale**: Performance + reliability + flexibility
+### 1. Flink does ETL — nothing else
 
-#### 4. **Aggregation Windows**
-- **Window Size**: 5 minutes (sliding)
-- **Watermark**: 10 minutes (handles late arrivals)
-- **Output Mode**: Append (for Druid compatibility)
+Aggregation, joins, and enrichment are explicitly excluded from the streaming layer. The Flink job validates Avro payloads, deduplicates by `event_id`, normalizes string fields, and emits to a single sink. State is bounded to a 2-hour dedup window, ensuring fast recovery and a compact codebase that is straightforward to review and maintain.
 
-#### 5. **Druid Ingestion**
-- **Method**: Kafka indexing service (native integration)
-- **Granularity**: 5-minute segments
-- **Rollup**: Pre-aggregation enabled for efficiency
+> **💡 Engineering Insight**
+>
+> The most robust streaming jobs are the simplest ones. The more state and logic Flink owns, the longer savepoints take, the slower recovery becomes, and the harder it is to evolve schemas. Push complexity to the edges — into the source contract (Schema Registry) and into the query engines (Druid rollup, ClickHouse MVs).
 
-## 🚀 Technology Stack
+### 2. Aggregations live where queries live
 
-| Layer | Technology | Purpose |
-|-------|-----------|---------|
-| Ingestion | Apache Kafka | Event streaming |
-| Processing | PySpark 3.5+ | Structured Streaming |
-| Storage (Bronze) | HDFS/S3 | Raw data lake |
-| Storage (Silver) | Apache Iceberg | Cleaned data warehouse |
-| Analytics (Gold) | Apache Druid | Real-time OLAP |
-| Orchestration | Apache Airflow | Workflow management |
-| Containerization | Docker Compose | Local development |
-| Monitoring | Prometheus + Grafana | Metrics & alerting |
+Druid handles 1-minute rollup natively at ingestion. ClickHouse uses `ReplicatedAggregatingMergeTree` materialized views to compute KPIs at write time. Adding a new metric becomes a SQL DDL statement — not a Flink redeploy and savepoint migration.
 
-## 📊 Event Schema
+### 3. One hub topic, three independent consumers
 
-### Input Event Structure
+Druid (Kafka Indexing Service), ClickHouse (Kafka Engine), and Kafka Connect (Iceberg sink) each maintain their own consumer group. A failure or restart in one does not affect the others. Adding a fourth consumer — Snowflake, Pinot, an alerting service — is a config change, not an architecture change.
+
+### 4. Native integrations only
+
+No custom sink code. Druid's Kafka Indexing Service, ClickHouse's Kafka Engine, and the Kafka Connect Iceberg Sink are all maintained by their respective communities and handle exactly-once semantics, schema evolution, and operational concerns out of the box.
+
+### 5. Replay is a consumer-group reset, not a backfill DAG
+
+For the 7-day retention window, replaying any sink is a single offset reset. For older data, the Iceberg SOR is the source for batch reprocessing through Trino or Spark. There is no separate Lambda-style batch path duplicating stream logic.
+
+> **⚠️ Pitfall**
+>
+> Avoid placing aggregations in Flink simply because the streaming job is already running. Window aggregations expand Flink state, complicate recovery, and introduce duplicate logic that must remain consistent with the BI layer's own computations. Aggregation responsibility should remain in the OLAP engines.
+
+---
+
+## § 4 Data Flow & Topology
+
+The lifecycle of a single event:
+
+```
+┌─────────────┐   ┌────────────────┐   ┌─────────────────┐   ┌─────────────────┐
+│ 1. Producer │ → │ 2. Kafka raw   │ → │ 3. Flink        │ → │ 4. Flink dedup  │
+│ microservice│   │ events.raw.v1  │   │ validate        │   │ RocksDB keyed   │
+│ emits Avro  │   │ 12 partitions  │   │ required fields │   │ state, 2h TTL   │
+└─────────────┘   └────────────────┘   └─────────────────┘   └────────┬────────┘
+                                                                      │
+       ┌───────────────────┐   ┌────────────────┐   ┌─────────────────┘
+       │ 6. Kafka hub      │ ◄ │ 5. Flink clean │ ◄─┘
+       │ events.clean.v1   │   │ trim/normalize │
+       │ 2PC exactly-once  │   │                │
+       └───┬──────┬──────┬─┘   └────────────────┘
+           │      │      │
+   ┌───────┘      │      └──────────┐
+   ▼              ▼                 ▼
+┌──────────┐  ┌──────────────┐  ┌──────────────────┐
+│ 7a. Druid│  │7b. ClickHouse│  │7c. Iceberg via   │
+│ Kafka    │  │ Kafka Engine │  │ Kafka Connect    │
+│ Indexing │  │ → MV →       │  │ Iceberg Sink     │
+│ rollup → │  │ Replicated   │  │ Connector        │
+│ segments │  │ ReplacingMT  │  │ commit every 60s │
+└──────────┘  └──────────────┘  └──────────────────┘
+```
+
+_Figure 4.1 — Event lifecycle: producer to three independent OLAP/lakehouse sinks._
+
+### Topic Inventory
+
+| Topic                       | Producer            | Consumers                    | Purpose                            |
+| --------------------------- | ------------------- | ---------------------------- | ---------------------------------- |
+| `ecommerce.events.raw.v1`   | Microservices       | Flink ETL job                | Source of truth (raw events)       |
+| `ecommerce.events.clean.v1` | Flink               | Druid · ClickHouse · Connect | Hub topic (validated, deduped)     |
+| `dlq.events`                | Flink (side output) | Filebeat → ELK               | Schema-violating / invalid records |
+
+---
+
+# Part II — Stream Layer
+
+> The Avro contract, the Kafka hub topic, and the minimal Flink ETL job that validates and deduplicates events.
+
+## § 5 Event Schema (Avro)
+
+Both raw and clean topics use the same Avro schema. Schema Registry compatibility is set to `FULL_TRANSITIVE`, blocking any breaking change at the producer side.
+
 ```json
 {
-  "event_id": "evt_1234567890",
-  "user_id": "user_abc123",
-  "product_id": "prod_xyz789",
-  "category": "Electronics",
-  "order_id": "order_456",
-  "event_type": "payment_success",
-  "quantity": 2,
-  "price": 599.99,
-  "payment_mode": "credit_card",
-  "event_time": "2026-02-06T10:30:45.123Z"
+  "namespace": "com.ecom.events",
+  "type": "record",
+  "name": "ClickstreamEvent",
+  "fields": [
+    { "name": "event_id", "type": "string" },
+    { "name": "user_id", "type": ["null", "string"], "default": null },
+    { "name": "session_id", "type": "string" },
+    { "name": "product_id", "type": ["null", "string"], "default": null },
+    { "name": "category", "type": ["null", "string"], "default": null },
+    {
+      "name": "event_type",
+      "type": {
+        "type": "enum",
+        "name": "EventType",
+        "symbols": [
+          "VIEW",
+          "ADD_TO_CART",
+          "REMOVE_CART",
+          "WISHLIST",
+          "ORDER_CREATED",
+          "PAYMENT_SUCCESS",
+          "PAYMENT_FAILED",
+          "ORDER_CANCELLED",
+          "REFUND"
+        ]
+      }
+    },
+    { "name": "quantity", "type": ["null", "int"], "default": null },
+    { "name": "price", "type": ["null", "double"], "default": null },
+    { "name": "payment_mode", "type": ["null", "string"], "default": null },
+    { "name": "device", "type": "string" },
+    { "name": "ip", "type": "string" },
+    {
+      "name": "event_time",
+      "type": { "type": "long", "logicalType": "timestamp-millis" }
+    }
+  ]
 }
 ```
 
-### Supported Event Types
-- `view_product`
-- `add_to_cart`
-- `remove_from_cart`
-- `add_to_wishlist`
-- `order_created`
-- `payment_success`
-- `payment_failed`
-- `order_cancelled`
-- `refund_processed`
+> **📌 Convention**
+>
+> Every event must carry a producer-side `event_id` that is stable across retries. Idempotency at the producer + dedup at Flink + exactly-once at the sinks gives end-to-end exactly-once delivery without coordination.
 
-## 🔧 Pipeline Features
+---
 
-### Real-Time Processing
-- **Micro-batch Intervals**: 30 seconds
-- **Checkpointing**: Every 30 seconds to HDFS
-- **Exactly-once Semantics**: Kafka offsets + idempotent writes
+## § 6 Flink ETL Job
 
-### Data Quality
-- **Schema Validation**: Enforced using StructType
-- **Deduplication**: Event ID-based
-- **Late Data Handling**: 30-minute watermark
-- **Data Profiling**: Automated quality checks
-
-### Fault Tolerance
-- **Checkpointing**: Stateful stream recovery
-- **Idempotent Writes**: Prevents duplicate aggregations
-- **Retry Logic**: Exponential backoff for failures
-- **Dead Letter Queue**: Invalid events quarantined
-
-### Performance Optimizations
-- **Partition Pruning**: Date-based partitioning
-- **Predicate Pushdown**: Filter early in pipeline
-- **Broadcast Joins**: For small dimension tables
-- **Caching**: Frequent lookups cached
-
-## 📈 Metrics & KPIs
-
-### Business Metrics (5-min windows)
-- Product view count by category
-- Cart conversion rate
-- Order creation rate
-- Payment success/failure ratio
-- Revenue (total and by category)
-- Refund rate
-- Average order value
-
-### Technical Metrics
-- Event processing latency (p50, p95, p99)
-- Kafka lag per partition
-- Checkpoint duration
-- State store size
-- Druid ingestion rate
-
-## 🗄️ Druid Schema Design
-
-### Datasource: `ecommerce_events`
-- **Dimensions**: event_type, category, payment_mode, user_id, product_id
-- **Metrics**: event_count, total_quantity, total_revenue
-- **Granularity**: 5-minute
-- **Rollup**: Enabled
-- **Segments**: Partitioned by hour
-
-### Query Patterns
-1. Real-time sales dashboard (last 24 hours)
-2. Product performance by category
-3. Payment method analysis
-4. Funnel analysis (view → cart → order → payment)
-5. Anomaly detection (sudden spikes/drops)
-
-## 🐳 Docker Setup
-
-### Services
-- **Zookeeper**: Kafka coordination
-- **Kafka**: Event streaming (3 brokers)
-- **Druid**: OLAP database (coordinator, broker, historical, middleManager)
-- **PostgreSQL**: Druid metadata
-- **Spark**: Master + 2 workers
-- **Airflow**: Webserver + scheduler
-- **HDFS**: Distributed storage (namenode, datanode)
-
-### Resource Allocation
-- Total Memory: ~16GB
-- Total CPUs: 8 cores
-- Suitable for local development/testing
-
-## 📁 Project Structure
+The job consists of two operators and two sinks, with a clear, linear topology.
 
 ```
-ecommerce-realtime-pipeline/
+                                                ┌──────────────────────────┐
+                                                │ KafkaSink (clean hub)    │
+                                                │ events.clean.v1 · 2PC    │
+                                            ┌─► └──────────────────────────┘
+                                            │
+┌────────────┐    ┌───────────────┐    ┌────┴──────────┐
+│ KafkaSource│ →  │ ValidateAnd   │ →  │ DedupFunction │
+│ raw.v1     │    │ Clean         │    │ keyed/RocksDB │
+└────────────┘    │ ProcessFn     │    └───────────────┘
+                  └───────┬───────┘            │
+                          │ side output (bad)  │
+                          ▼                    │
+                  ┌──────────────────┐         │
+                  │ KafkaSink (DLQ)  │ ◄───────┘
+                  │ dlq.events       │  (data path also tagged
+                  └──────────────────┘   when validation fails)
+```
+
+_Figure 6.1 — Flink job DAG: source → validate-clean → dedup → clean sink, with DLQ side output._
+
+### Job Skeleton
+
+```java
+public class EcomEtlJob {
+  public static void main(String[] args) throws Exception {
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    env.enableCheckpointing(30_000, CheckpointingMode.EXACTLY_ONCE);
+    env.getCheckpointConfig().setCheckpointStorage("s3://flink-ckpt/ecom/");
+    env.setStateBackend(new EmbeddedRocksDBStateBackend(true));   // incremental
+
+    KafkaSource<ClickstreamEvent> source = KafkaSource.<ClickstreamEvent>builder()
+      .setBootstrapServers(KAFKA)
+      .setTopics("ecommerce.events.raw.v1")
+      .setGroupId("flink-ecom-etl")
+      .setStartingOffsets(OffsetsInitializer.committedOffsets(OffsetResetStrategy.EARLIEST))
+      .setValueOnlyDeserializer(ConfluentRegistryAvroDeserializationSchema
+          .forSpecific(ClickstreamEvent.class, SR_URL))
+      .build();
+
+    final OutputTag<String> dlqTag = new OutputTag<String>("dlq"){};
+
+    SingleOutputStreamOperator<ClickstreamEvent> clean = env
+      .fromSource(source, WatermarkStrategy.noWatermarks(), "kafka-source")
+      .process(new ValidateAndClean(dlqTag))            // validation + cleaning
+      .keyBy(ClickstreamEvent::getEventId)
+      .process(new DedupFunction(Time.hours(2)));       // dedup
+
+    // Main sink → clean topic (exactly-once 2PC)
+    clean.sinkTo(KafkaSink.<ClickstreamEvent>builder()
+      .setBootstrapServers(KAFKA)
+      .setRecordSerializer(KafkaRecordSerializationSchema.builder()
+        .setTopic("ecommerce.events.clean.v1")
+        .setValueSerializationSchema(new ConfluentAvroSerializer(SR_URL))
+        .build())
+      .setDeliveryGuarantee(DeliveryGuarantee.EXACTLY_ONCE)
+      .setTransactionalIdPrefix("ecom-etl-")
+      .build());
+
+    // DLQ side output
+    clean.getSideOutput(dlqTag).sinkTo(kafkaSink("dlq.events"));
+
+    env.execute("ecom-etl-v3");
+  }
+}
+```
+
+> **💡 Engineering Insight**
+>
+> Use `EmbeddedRocksDBStateBackend(true)` for _incremental_ checkpoints. With a 2-hour dedup window at 80k events/sec, the keyed state can reach a few GB; full-snapshot checkpoints would be slow and disk-heavy. Incremental checkpoints write only changed RocksDB SST files.
+
+### Validation Rules (inside `ValidateAndClean`)
+
+- **Required fields present:** `event_id`, `session_id`, `event_type`, `device`, `ip`, `event_time` all non-null and non-empty
+- **Value ranges:** `quantity ≥ 0`; `price ≥ 0`; `event_time` within ±48h of processing time
+- **Cleaning:** trim whitespace on string fields, lowercase `category`, normalize `device` to canonical set (`web`, `android`, `ios`, `other`)
+- **Failures:** emit a JSON envelope with `{reason, raw_payload, ingest_ts}` to the DLQ side output
+
+> **⚠️ Pitfall — DedupFunction TTL**
+>
+> If your TTL is shorter than the longest legitimate retry window of an upstream producer, you will let through duplicates after a producer rebalance. Two hours is a safe default for typical microservice retry budgets; verify against your producer SLA.
+
+---
+
+## § 7 Kafka Hub Topic
+
+The clean topic is the contract every downstream system depends on. It is sized and configured for a 7-day replay window and three independent consumer groups.
+
+| Property           | Value                                 | Why                                                                                      |
+| ------------------ | ------------------------------------- | ---------------------------------------------------------------------------------------- |
+| Partitions         | 12                                    | Caps parallelism for downstream consumers (Druid taskCount, CH consumers, Connect tasks) |
+| Replication factor | 3 (min.isr=2)                         | Survives single-broker loss without producer block                                       |
+| Retention          | 7 days                                | Long enough for OLAP replay; Iceberg holds longer history                                |
+| Compression        | zstd                                  | ~3× over snappy on Avro-encoded payloads                                                 |
+| Cleanup policy     | `delete`                              | Event log, not state — no compaction                                                     |
+| Schema             | Avro via Schema Registry              | Strict contract; FULL_TRANSITIVE compat                                                  |
+| Key                | `user_id` (or `session_id` if null)   | Co-locates user activity in one partition for stateful consumers                         |
+| Producer           | `acks=all, idempotent, transactional` | Exactly-once from Flink                                                                  |
+
+### Consumer Groups
+
+| Group ID                 | Owner                           | Read mode        |
+| ------------------------ | ------------------------------- | ---------------- |
+| `druid-ecom-gold`        | Druid Kafka Indexing supervisor | `read_committed` |
+| `clickhouse-ecom-events` | ClickHouse Kafka Engine table   | `read_committed` |
+| `connect-iceberg-events` | Kafka Connect Iceberg sink      | `read_committed` |
+
+> **💡 Engineering Insight — read_committed**
+>
+> All three consumers must use `isolation.level=read_committed`. Flink commits its sink writes transactionally; without read_committed, downstream consumers would see aborted-transaction records and end up with duplicates that bypass exactly-once entirely.
+
+---
+
+# Part III — Storage & Analytics
+
+> How Druid, ClickHouse, and Iceberg each consume the hub topic — and why each gets the workload it gets.
+
+## § 8 Druid — Real-time OLAP
+
+Druid is the surface for live operational dashboards: revenue in the last 5 minutes, conversion rates by category, current cart-abandonment counts. Its Kafka Indexing Service consumes the hub topic and applies **rollup at ingestion** — pre-aggregating events into 1-minute buckets per dimension combination — which gives sub-second query latency on 7 days of hot data.
+
+### Ingestion Spec
+
+```json
+{
+  "type": "kafka",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "ecommerce_events",
+      "timestampSpec": { "column": "event_time", "format": "iso" },
+      "dimensionsSpec": {
+        "dimensions": ["event_type", "category", "payment_mode", "device"]
+      },
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "HOUR",
+        "queryGranularity": "MINUTE",
+        "rollup": true
+      },
+      "metricsSpec": [
+        { "type": "count", "name": "events" },
+        { "type": "longSum", "name": "qty", "fieldName": "quantity" },
+        { "type": "doubleSum", "name": "revenue", "fieldName": "price" },
+        {
+          "type": "HLLSketchBuild",
+          "name": "uniq_users",
+          "fieldName": "user_id"
+        }
+      ]
+    },
+    "ioConfig": {
+      "topic": "ecommerce.events.clean.v1",
+      "consumerProperties": {
+        "bootstrap.servers": "kafka:9092",
+        "group.id": "druid-ecom-gold",
+        "isolation.level": "read_committed"
+      },
+      "taskCount": 2,
+      "replicas": 2
+    }
+  }
+}
+```
+
+> **📌 Why rollup beats Flink windowing here**
+>
+> With `rollup=true` + `queryGranularity=MINUTE`, Druid stores one row per (event_type, category, payment_mode, device, minute) tuple instead of one row per event. For 80k events/sec across ~40 unique dimension tuples per minute, that's a ~120,000× compression — and queries like "revenue per category last 24h" become a small range scan on pre-aggregated data.
+
+---
+
+## § 9 ClickHouse — Historical OLAP
+
+ClickHouse holds the full event history (2-year TTL) and is the surface for ad-hoc analyst queries, A/B test analysis, and complex SQL that doesn't fit Druid's pre-aggregated model. The pattern is canonical: a `Kafka Engine` table consumes the hub topic, a materialized view glues it to a `ReplicatedReplacingMergeTree` storage table, and additional MVs compute KPIs at write time.
+
+```
+┌──────────────────┐     ┌──────────────┐     ┌────────────┐    ┌─────────────────────┐
+│ Kafka clean topic│ ──► │ events_kafka │ ──► │ events_mv  │ ─► │ events_local        │
+│ events.clean.v1  │     │ Engine=Kafka │     │ MV (glue)  │    │ ReplicatedReplacing │
+└──────────────────┘     └──────────────┘     └────────────┘    │ MergeTree           │
+                                                                │                     │
+                                                                ├─► kpi_1min_mv       │
+                                                                │   AggregatingMT     │
+                                                                │                     │
+                                                                └─► funnel_5min_mv    │
+                                                                    AggregatingMT     │
+                                                                └─────────────────────┘
+```
+
+_Figure 9.1 — ClickHouse ingestion pattern: Kafka Engine → MV glue → MergeTree storage → cascading KPI MVs._
+
+### Storage Table
+
+```sql
+CREATE TABLE ecom.events_local ON CLUSTER '{cluster}' (
+  event_id      String,
+  event_time    DateTime64(3),
+  user_id       Nullable(String),
+  session_id    String,
+  product_id    Nullable(String),
+  category      LowCardinality(Nullable(String)),
+  event_type    LowCardinality(String),
+  quantity      Nullable(UInt32),
+  price         Nullable(Float64),
+  payment_mode  LowCardinality(Nullable(String)),
+  device        LowCardinality(String),
+  ingest_ts     DateTime64(3) DEFAULT now64(3)
+)
+ENGINE = ReplicatedReplacingMergeTree(
+  '/clickhouse/tables/{shard}/events', '{replica}')
+PARTITION BY toYYYYMMDD(event_time)
+ORDER BY (event_type, category, event_time, event_id)
+TTL event_time + INTERVAL 2 YEAR;
+```
+
+### Kafka Engine + Glue MV
+
+```sql
+CREATE TABLE ecom.events_kafka ON CLUSTER '{cluster}' (
+  event_id String, event_time DateTime64(3),
+  user_id Nullable(String), session_id String,
+  product_id Nullable(String), category Nullable(String),
+  event_type String, quantity Nullable(UInt32),
+  price Nullable(Float64), payment_mode Nullable(String),
+  device String
+)
+ENGINE = Kafka
+SETTINGS
+  kafka_broker_list         = 'kafka:9092',
+  kafka_topic_list          = 'ecommerce.events.clean.v1',
+  kafka_group_name          = 'clickhouse-ecom-events',
+  kafka_format              = 'AvroConfluent',
+  kafka_schema_registry_url = 'http://schema-registry:8081',
+  kafka_num_consumers       = 4,
+  kafka_handle_error_mode   = 'stream';
+
+CREATE MATERIALIZED VIEW ecom.events_mv ON CLUSTER '{cluster}'
+TO ecom.events_local AS SELECT * FROM ecom.events_kafka;
+```
+
+### KPI Materialized Views
+
+```sql
+-- 1-minute KPI rollup
+CREATE MATERIALIZED VIEW ecom.kpi_1min_mv ON CLUSTER '{cluster}'
+ENGINE = ReplicatedAggregatingMergeTree(
+  '/clickhouse/tables/{shard}/kpi_1min', '{replica}')
+PARTITION BY toYYYYMMDD(window_start)
+ORDER BY (category, event_type, window_start)
+AS SELECT
+  toStartOfMinute(event_time)        AS window_start,
+  category,
+  event_type,
+  countState()                       AS event_count,
+  sumState(quantity)                 AS qty,
+  sumState(price * quantity)         AS revenue,
+  uniqExactState(user_id)            AS unique_users
+FROM ecom.events_local
+GROUP BY window_start, category, event_type;
+
+-- 5-minute funnel
+CREATE MATERIALIZED VIEW ecom.funnel_5min_mv ON CLUSTER '{cluster}'
+ENGINE = ReplicatedAggregatingMergeTree(
+  '/clickhouse/tables/{shard}/funnel_5min', '{replica}')
+PARTITION BY toYYYYMMDD(window_start)
+ORDER BY (category, window_start)
+AS SELECT
+  toStartOfFiveMinute(event_time) AS window_start,
+  category,
+  countIfState(event_type = 'VIEW')                          AS views,
+  countIfState(event_type = 'ADD_TO_CART')                   AS carts,
+  countIfState(event_type = 'ORDER_CREATED')                 AS orders,
+  countIfState(event_type = 'PAYMENT_SUCCESS')               AS payments,
+  sumIfState(price * quantity, event_type='PAYMENT_SUCCESS') AS revenue
+FROM ecom.events_local
+GROUP BY window_start, category;
+```
+
+> **💡 Engineering Insight**
+>
+> Adding a new metric is now a `CREATE MATERIALIZED VIEW`, not a Flink savepoint-and-redeploy. Compare that with a Flink-side aggregation where adding a metric requires updating the windowed operator, restoring from savepoint, and reprocessing — all while keeping the previous version running.
+
+---
+
+## § 10 Iceberg via Kafka Connect
+
+The Iceberg sink is operationally a _sidecar_ — a Kafka Connect cluster running the [Iceberg Sink Connector](https://github.com/databricks/iceberg-kafka-connect). Connect tasks read the same hub topic, batch records, and centrally commit small files into Iceberg tables on MinIO/S3.
+
+```json
+{
+  "name": "iceberg-sink-events",
+  "config": {
+    "connector.class": "io.tabular.iceberg.connect.IcebergSinkConnector",
+    "tasks.max": "4",
+    "topics": "ecommerce.events.clean.v1",
+    "iceberg.tables": "warehouse.silver.events_clean",
+    "iceberg.tables.upsert-mode-enabled": "true",
+    "iceberg.tables.id-columns": "event_id",
+    "iceberg.catalog.type": "rest",
+    "iceberg.catalog.uri": "http://iceberg-rest:8181",
+    "iceberg.control.commit.interval-ms": "60000",
+    "value.converter": "io.confluent.connect.avro.AvroConverter",
+    "value.converter.schema.registry.url": "http://schema-registry:8081"
+  }
+}
+```
+
+### Why Connect Instead of a Flink Iceberg Sink
+
+- **Centralized commits.** The Iceberg Connect connector elects one task as commit coordinator — one commit per minute across all tasks → no metadata explosion.
+- **Independent failure domain.** Iceberg writes can fail or restart without touching the Flink job's checkpointing.
+- **Independent scaling.** Connect `tasks.max` scales independently from Flink parallelism.
+- **Less code in Flink.** Keeps the streaming job small and focused.
+
+> **📝 Note — File Compaction**
+>
+> Even with centralized commits, an actively written table accumulates many small Parquet files over weeks. The Airflow `iceberg_compaction` DAG (see § 12) runs `rewrite_data_files` nightly to keep query performance high.
+
+---
+
+# Part IV — Operations
+
+> Observability, orchestration, replays, and the performance envelope this design is built for.
+
+## § 11 ELK Observability
+
+Logs, metrics, and synthetic checks all flow through the Elastic stack. There is no separate Prometheus or Grafana — Kibana is the single pane.
+
+```
+┌─────────────────────┐
+│ Filebeat (logs)     │ ──┐
+└─────────────────────┘   │
+┌─────────────────────┐   │     ┌─────────────────┐     ┌─────────────────┐     ┌─────────┐
+│ Metricbeat (metrics)│ ──┼───► │ Logstash (parse)│ ──► │ Elasticsearch   │ ──► │ Kibana  │
+└─────────────────────┘   │     └─────────────────┘     └────────┬────────┘     └─────────┘
+┌─────────────────────┐   │                                      │
+│ Heartbeat (synthetic)│ ─┘                                      ▼
+└─────────────────────┘                              ┌────────────────────┐    ┌─────────────┐
+                                                    │ Watcher · ElastAlert│ ─► │ Slack · PD  │
+                                                    └────────────────────┘    └─────────────┘
+```
+
+_Figure 11.1 — ELK pipeline: Beats agents → Logstash → Elasticsearch → Kibana / Alerting._
+
+### Beats Layout
+
+| Beat           | Where                | What it watches                                                             |
+| -------------- | -------------------- | --------------------------------------------------------------------------- |
+| **Filebeat**   | Every node/container | stdout/stderr from Flink, Kafka, Connect, CH, Druid, Airflow                |
+| **Metricbeat** | Every node           | `system`, `docker`, `kafka` (JMX), `jvm`, `clickhouse`, `http` (Flink REST) |
+| **Heartbeat**  | Dedicated            | Druid SQL, CH `SELECT 1`, Flink JM, consumer-group lag thresholds           |
+
+### Index Lifecycle (ILM)
+
+| Index pattern       | Hot       | Warm | Cold | Delete |
+| ------------------- | --------- | ---- | ---- | ------ |
+| `logs-flink-*`      | 1d / 50GB | 7d   | 30d  | 90d    |
+| `logs-kafka-*`      | 1d / 50GB | 7d   | 30d  | 90d    |
+| `logs-clickhouse-*` | 1d / 30GB | 7d   | 30d  | 90d    |
+| `logs-druid-*`      | 1d / 30GB | 7d   | 30d  | 90d    |
+| `metricbeat-*`      | 1d / 50GB | 7d   | 30d  | 180d   |
+| `heartbeat-*`       | 1d        | 14d  | —    | 90d    |
+
+Hot tier on NVMe, warm on SSD, cold on HDD. ILM automates rollover via the Elasticsearch policy engine.
+
+### Standard Alert Set
+
+| Alert                       | Trigger            | Severity |
+| --------------------------- | ------------------ | -------- |
+| Druid consumer lag          | > 50k for 2 min    | P1       |
+| ClickHouse consumer lag     | > 100k for 5 min   | P2       |
+| Flink checkpoint failures   | ≥ 3 consecutive    | P1       |
+| Flink job restart           | > 0 in last 1 min  | P1       |
+| Kafka URP                   | > 0 for 5 min      | P1       |
+| CH parts per partition      | > 300              | P2       |
+| Iceberg connect commit fail | any                | P2       |
+| DLQ rate                    | > 1% of throughput | P2       |
+
+### Sample Watcher Alert
+
+```json
+{
+  "trigger": { "schedule": { "interval": "1m" } },
+  "input": {
+    "search": {
+      "request": {
+        "indices": ["metricbeat-kafka-*"],
+        "body": {
+          "query": {
+            "bool": {
+              "filter": [
+                { "term": { "kafka.consumergroup.id": "druid-ecom-gold" } },
+                { "range": { "@timestamp": { "gte": "now-2m" } } }
+              ]
+            }
+          },
+          "aggs": {
+            "max_lag": { "max": { "field": "kafka.consumergroup.lag" } }
+          }
+        }
+      }
+    }
+  },
+  "condition": {
+    "compare": { "ctx.payload.aggregations.max_lag.value": { "gt": 50000 } }
+  },
+  "actions": { "slack": { "...": "..." }, "pagerduty": { "...": "..." } }
+}
+```
+
+### Kibana Dashboards
+
+1. **Pipeline Health** — Flink checkpoint duration, restart count, throughput per operator
+2. **Sink Lag Watchtower** — One panel per consumer group with color-coded thresholds
+3. **DLQ Inspector** — `dlq.events` reasons, rates, top offenders
+4. **Druid Ops** — segment counts, query latency, supervisor health
+5. **ClickHouse Ops** — parts per partition, merge backlog, replication delay
+
+---
+
+## § 12 Airflow Orchestration
+
+Airflow handles everything that is genuinely batch-shaped — periodic maintenance, compliance, and recovery jobs. The streaming layer never depends on Airflow at runtime.
+
+| DAG                        | Schedule    | Purpose                                                                 |
+| -------------------------- | ----------- | ----------------------------------------------------------------------- |
+| `iceberg_compaction`       | daily 02:00 | `rewrite_data_files` + `expire_snapshots` on silver tables              |
+| `dq_great_expectations`    | hourly      | Run GE suites against Iceberg silver layer; page on failure             |
+| `gdpr_right_to_forget`     | triggered   | Cascade deletes across Iceberg / ClickHouse / Druid for a given user_id |
+| `flink_savepoint_rotation` | daily 03:00 | Trigger Flink savepoint, retain last 7                                  |
+
+> **💡 Engineering Insight**
+>
+> The streaming pipeline is fully self-sufficient at runtime — Airflow exists only for housekeeping. If Airflow is down, dashboards keep working, ingestion keeps working, replays work via consumer-group offsets. This is a strict separation of _data plane_ (always-on streaming) from _control plane_ (periodic batch).
+
+---
+
+## § 13 Operations & Replay
+
+### Replay ClickHouse from Earliest
+
+To replay all retained data into ClickHouse, recreate the Kafka Engine table with a new consumer group name:
+
+```sql
+DETACH TABLE ecom.events_kafka ON CLUSTER '{cluster}';
+
+ALTER TABLE ecom.events_kafka ON CLUSTER '{cluster}'
+  MODIFY SETTING kafka_group_name = 'ch-ecom-replay-2026-05-08';
+
+ATTACH TABLE ecom.events_kafka ON CLUSTER '{cluster}';
+```
+
+### Replay Druid from a Specific Timestamp
+
+```bash
+# 1. Terminate the supervisor
+curl -X POST http://localhost:8888/druid/indexer/v1/supervisor/ecommerce_events/terminate
+
+# 2. Reset the consumer group offsets to a timestamp
+kafka-consumer-groups.sh --bootstrap-server kafka:9092 \
+  --group druid-ecom-gold --topic ecommerce.events.clean.v1 \
+  --reset-offsets --to-datetime 2026-05-08T00:00:00.000 --execute
+
+# 3. Re-create the supervisor
+curl -X POST -H 'Content-Type: application/json' \
+  -d @druid/ingestion-spec.json \
+  http://localhost:8888/druid/indexer/v1/supervisor
+```
+
+### Trigger a Flink Savepoint
+
+```bash
+flink savepoint <jobId> s3://flink-savepoints/ecom/
+```
+
+> **📌 Operational Tip**
+>
+> Always take a manual savepoint before deploying a new Flink JAR, then submit the new job with `--fromSavepoint <path>`. This preserves dedup state across upgrades — without it, a deploy could let through duplicates that arrived during the gap.
+
+---
+
+## § 14 Performance Targets
+
+| Metric                               | Target          | Notes                                                           |
+| ------------------------------------ | --------------- | --------------------------------------------------------------- |
+| Flink throughput                     | 80k+ events/sec | 4 TaskManagers × 8 slots; bottleneck is Avro deserialization    |
+| Flink p95 latency (raw → clean)      | < 200ms         | Dominated by 30s checkpoint barrier; unaligned checkpoints help |
+| Druid end-to-end (event → queryable) | < 30s           | Bound by `intermediatePersistPeriod`                            |
+| ClickHouse end-to-end                | < 60s           | Bound by Kafka Engine block size + MV materialization           |
+| Druid query p95                      | < 500ms         | On 7 days, rollup-aggregated                                    |
+| ClickHouse query p95 (1B rows)       | < 2s            | With proper ORDER BY hits                                       |
+| Iceberg commit interval              | 60s             | Connect default; tunable                                        |
+| Kafka log retention (hub)            | 7 days          | Replay window without Iceberg                                   |
+
+> **🔑 Key Takeaway**
+>
+> By moving aggregations out of Flink, the streaming job becomes CPU-bound on a single thing — Avro deserialization — which scales linearly with TaskManager count. Throughput targets above are conservative for the simplified design.
+
+---
+
+## § 15 Project Structure & Quick Start
+
+### Repository Layout
+
+```
+ecommerce-realtime-pipeline-v3/
 ├── README.md
 ├── docker/
 │   ├── docker-compose.yml
-│   ├── kafka/
-│   ├── druid/
-│   ├── spark/
-│   └── airflow/
-├── src/
-│   ├── streaming/
-│   │   ├── main.py                    # Main streaming application
-│   │   ├── schema.py                  # Event schemas
-│   │   ├── transformations.py         # Data transformations
-│   │   └── aggregations.py            # Window aggregations
-│   ├── druid/
-│   │   ├── ingestion_spec.json        # Druid ingestion config
-│   │   └── queries.sql                # Sample queries
-│   └── utils/
-│       ├── kafka_producer.py          # Test data generator
-│       └── config.py                  # Configuration management
-├── airflow/
-│   ├── dags/
-│   │   ├── backfill_pipeline.py       # Batch backfill DAG
-│   │   └── monitoring_dag.py          # Health checks
-│   └── plugins/
-├── tests/
-│   ├── unit/
-│   └── integration/
-├── config/
-│   ├── spark-defaults.conf
-│   └── druid-config.json
-├── scripts/
-│   ├── setup.sh                       # Environment setup
-│   ├── start_pipeline.sh              # Start streaming
-│   └── generate_data.sh               # Generate test events
-└── requirements.txt
+│   └── elk/
+├── flink-app/                       # Java 17 / Maven
+│   ├── pom.xml
+│   └── src/main/java/com/ecom/
+│       ├── EcomEtlJob.java
+│       ├── ValidateAndClean.java
+│       └── DedupFunction.java
+├── clickhouse/
+│   ├── 01_storage_tables.sql
+│   ├── 02_kafka_engine.sql
+│   └── 03_materialized_views.sql
+├── druid/
+│   └── ingestion-spec.json
+├── kafka-connect/
+│   └── iceberg-sink.json
+├── airflow/dags/
+├── elk/
+│   ├── logstash-pipelines/
+│   ├── ilm-policies/
+│   ├── watcher-alerts/
+│   └── kibana-dashboards/
+└── scripts/
+    ├── start_stack.sh
+    └── submit_flink_job.sh
 ```
 
-## 🎯 Quick Start
-
-### Prerequisites
-- Docker Desktop (16GB RAM, 4+ CPUs)
-- Python 3.9+
-- 20GB free disk space
-
-### Setup Steps
+### Quick Start
 
 ```bash
-# 1. Clone and navigate
-cd ecommerce-realtime-pipeline
+# 1. Bring up the stack
+./scripts/start_stack.sh
 
-# 2. Start infrastructure
-docker-compose up -d
+# 2. Register the Avro schema
+curl -X POST http://localhost:8081/subjects/ecommerce.events.raw.v1-value/versions \
+  -H "Content-Type: application/vnd.schemaregistry.v1+json" \
+  -d "{\"schema\":$(jq -Rs . < schemas/clickstream.avsc)}"
 
-# 3. Wait for services to be healthy (2-3 minutes)
-docker-compose ps
+# 3. Submit the Flink ETL job
+cd flink-app && mvn -DskipTests package
+flink run -d -p 8 -c com.ecom.EcomEtlJob target/ecom-etl-3.0.jar
 
-# 4. Create Kafka topic
-docker exec kafka kafka-topics --create \
-  --topic ecommerce-events \
-  --partitions 3 \
-  --replication-factor 1 \
-  --bootstrap-server localhost:9092
+# 4. Apply ClickHouse schemas
+clickhouse-client --multiquery < clickhouse/01_storage_tables.sql
+clickhouse-client --multiquery < clickhouse/02_kafka_engine.sql
+clickhouse-client --multiquery < clickhouse/03_materialized_views.sql
 
-# 5. Install Python dependencies
-pip install -r requirements.txt
+# 5. Configure the Iceberg sink connector
+curl -X POST -H 'Content-Type: application/json' \
+  -d @kafka-connect/iceberg-sink.json \
+  http://localhost:8083/connectors
 
-# 6. Start data generator
-python src/utils/kafka_producer.py
+# 6. Launch the Druid Kafka Indexing supervisor
+curl -X POST -H 'Content-Type: application/json' \
+  -d @druid/ingestion-spec.json \
+  http://localhost:8888/druid/indexer/v1/supervisor
 
-# 7. Submit streaming job
-spark-submit \
-  --master spark://localhost:7077 \
-  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0 \
-  src/streaming/main.py
-
-# 8. Access UIs
-# Spark: http://localhost:8080
-# Druid: http://localhost:8888
-# Airflow: http://localhost:8081
+# 7. Import Kibana dashboards
+curl -X POST 'http://localhost:5601/api/saved_objects/_import?overwrite=true' \
+  -H 'kbn-xsrf: true' --form file=@elk/kibana-dashboards/all.ndjson
 ```
 
-## 📊 Monitoring & Observability
+### UIs
 
-### Metrics Collection
-- **Spark Metrics**: Exposed via REST API
-- **Kafka Metrics**: JMX metrics to Prometheus
-- **Druid Metrics**: Native monitoring
+| Service         | URL                        |
+| --------------- | -------------------------- |
+| Flink Web UI    | http://localhost:8082      |
+| Kafka UI        | http://localhost:8085      |
+| Druid Console   | http://localhost:8888      |
+| ClickHouse Play | http://localhost:8123/play |
+| Kafka Connect   | http://localhost:8083      |
+| Airflow         | http://localhost:8080      |
+| Kibana          | http://localhost:5601      |
+| MinIO Console   | http://localhost:9001      |
 
-### Dashboards
-1. **Pipeline Health**: Latency, throughput, errors
-2. **Business KPIs**: Revenue, orders, conversions
-3. **Resource Usage**: CPU, memory, disk
+---
 
-### Alerting Rules
-- Kafka lag > 10,000 messages
-- Processing latency > 5 minutes
-- Failed payment rate > 5%
-- Checkpoint failure
-
-## 🔄 Backfill Strategy
-
-### Scenarios
-1. **New Metric Addition**: Process historical data for new aggregations
-2. **Bug Fixes**: Reprocess specific date ranges
-3. **Data Refresh**: Full historical refresh
-
-### Airflow DAG Features
-- Date range parameterization
-- Incremental processing
-- Idempotent execution
-- Progress tracking
-
-## 🧪 Testing Strategy
-
-### Unit Tests
-- Schema validation
-- Transformation logic
-- Aggregation calculations
-
-### Integration Tests
-- End-to-end pipeline with test Kafka
-- Druid query validation
-- Checkpoint recovery
-
-### Performance Tests
-- Throughput benchmarking (target: 10k events/sec)
-- Latency testing (target: p95 < 5s)
-- Scalability testing (partition scaling)
-
-## 📝 Resume-Ready Project Summary
-
-**Project**: Real-Time E-Commerce Analytics Pipeline  
-**Role**: Data Engineer  
-**Duration**: [Your timeline]
-
-**Overview**:  
-Designed and implemented a production-grade real-time data pipeline processing 10k+ events/second from an e-commerce platform, enabling sub-minute business intelligence dashboards.
-
-**Technical Achievements**:
-- Built end-to-end streaming pipeline using PySpark Structured Streaming, Apache Kafka, and Apache Druid
-- Implemented medallion architecture (Bronze/Silver/Gold) ensuring data quality and lineage
-- Achieved exactly-once processing semantics with checkpointing and idempotent writes
-- Designed 5-minute window aggregations for real-time KPIs (revenue, conversions, cart metrics)
-- Reduced query latency from 30s (batch) to <1s (streaming) using Druid OLAP engine
-- Implemented late data handling with 30-minute watermarking, achieving 99.9% completeness
-- Built automated backfill framework using Apache Airflow for historical reprocessing
-- Containerized entire stack using Docker Compose for reproducible local development
-
-**Technologies**:  
-Apache Kafka, PySpark 3.5, Apache Druid, Apache Iceberg, HDFS, Apache Airflow, Docker, Python, SQL
-
-**Business Impact**:
-- Enabled real-time fraud detection reducing payment failures by 15%
-- Improved inventory management with live product view metrics
-- Empowered marketing team with sub-minute campaign performance data
-- Reduced data pipeline operational costs by 30% through optimized resource allocation
-
-**Key Responsibilities**:
-- Architected medallion data lake with Bronze (raw), Silver (cleaned), Gold (aggregated) layers
-- Implemented schema evolution and data quality checks using Apache Iceberg
-- Optimized Druid ingestion reducing segment size by 40% through rollup configurations
-- Created monitoring dashboards tracking pipeline health and business KPIs
-- Established data governance policies for PII handling and GDPR compliance
-
-## 🤝 Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
-
-## 📄 License
-
-MIT License - see [LICENSE](LICENSE)
-
-## 📧 Contact
-
-[Your Name] - [Your Email]  
-Project Link: [GitHub Repository]
+_Real-Time E-Commerce Analytics Pipeline · Engineering Wiki v3.0 · MIT License_

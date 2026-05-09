@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker compose *)",
+      "Bash(mkdir -p \"c:\\\\Users\\\\Rahul102.Yadav\\\\OneDrive - Reliance Corporate IT Park Limited\\\\Documents\\\\Project\\\\ecommerce-realtime-pipeline\\\\elk\\\\logstash-pipelines\")",
+      "Bash(mkdir -p \"c:\\\\Users\\\\Rahul102.Yadav\\\\OneDrive - Reliance Corporate IT Park Limited\\\\Documents\\\\Project\\\\ecommerce-realtime-pipeline\\\\kafka-connect\")",
+      "Bash(mkdir -p \"c:\\\\Users\\\\Rahul102.Yadav\\\\OneDrive - Reliance Corporate IT Park Limited\\\\Documents\\\\Project\\\\ecommerce-realtime-pipeline\\\\airflow\\\\dags\")",
+      "Bash(mkdir -p \"c:\\\\Users\\\\Rahul102.Yadav\\\\OneDrive - Reliance Corporate IT Park Limited\\\\Documents\\\\Project\\\\ecommerce-realtime-pipeline\\\\clickhouse\")",
+      "PowerShell(netstat -ano)",
+      "PowerShell(head -5)",
+      "Bash(findstr /v \"Up \")",
+      "Bash(docker start *)",
+      "Bash(curl -sf http://localhost:8081/subjects)",
+      "Bash(bash scripts/submit-druid-supervisor.sh http://localhost:8888)",
+      "Bash(curl -sf http://localhost:8888/druid/indexer/v1/supervisor/ecommerce_events)",
+      "Bash(python -c ' *)",
+      "Bash(curl -sf \"http://localhost:8888/druid/indexer/v1/tasks?supervisorTaskId=ecommerce_events&state=running\")",
+      "Bash(curl -sf http://localhost:8888/druid/indexer/v1/supervisor/ecommerce_events/status)",
+      "Bash(curl -sf \"http://localhost:8888/druid/indexer/v1/completeTasks\")",
+      "Bash(curl -sf \"http://localhost:8888/druid/indexer/v1/pendingTasks\")",
+      "Bash(curl -sf -X POST http://localhost:8888/druid/indexer/v1/supervisor/ecommerce_events/terminate -H 'Content-Type: application/json')",
+      "Bash(curl -sf -X POST http://localhost:8888/druid/indexer/v1/supervisor -H 'Content-Type: application/json' -d @druid/ingestion-spec.json)",
+      "Bash(curl -sf -X POST http://localhost:8888/druid/indexer/v1/supervisor/ecommerce_events/terminate -H \"Content-Type: application/json\")"
+    ]
+  }
+}
