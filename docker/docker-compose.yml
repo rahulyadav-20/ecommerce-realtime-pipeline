@@ -15,8 +15,8 @@
 #   http://localhost:8123  → ClickHouse HTTP / Play (/play)
 #   http://localhost:8124  → ClickHouse UI          (ch-ui)
 #   http://localhost:8181  → Iceberg REST Catalog
-#   http://localhost:9001  → MinIO Console
-#   http://localhost:9002  → MinIO S3 API            (host:9000 reserved by corporate VPN)
+#   http://localhost:9001  → MinIO Console      (minio / minio123)
+#   http://localhost:9002  → MinIO S3 API      (host:9000 taken by ClickHouse native protocol)
 #   http://localhost:9200  → Elasticsearch REST
 #   http://localhost:5601  → Kibana
 # =============================================================================
@@ -35,8 +35,8 @@ x-flink-env: &flink-env
     state.checkpoints.dir: s3://flink-ckpt/ecom/
     state.savepoints.dir: s3://flink-savepoints/ecom/
     s3.endpoint: http://minio:9000
-    s3.access-key: minioadmin
-    s3.secret-key: minioadmin
+    s3.access-key: minio
+    s3.secret-key: minio123
     s3.path.style.access: true
     execution.checkpointing.interval: 30000
     execution.checkpointing.mode: EXACTLY_ONCE
@@ -70,23 +70,55 @@ x-druid-common: &druid-common
 x-airflow-common: &airflow-common
   image: apache/airflow:2.9.3
   environment:
-    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    # ── Executor ──────────────────────────────────────────────────────────────
+    # LocalExecutor runs tasks in subprocesses on the scheduler node.
+    # No Redis/Celery broker needed — simpler stack for local dev.
+    # Switch to CeleryExecutor + Redis when horizontal scaling is required.
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+
+    # ── Database ──────────────────────────────────────────────────────────────
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
-    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@airflow-postgres/airflow
-    AIRFLOW__CELERY__BROKER_URL: redis://:@airflow-redis:6379/0
+    AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE: 5
+    AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_OVERFLOW: 10
+
+    # ── Security ──────────────────────────────────────────────────────────────
+    # Fernet key encrypts connection passwords at rest.
+    # Rotate before deploying to any shared environment.
     AIRFLOW__CORE__FERNET_KEY: "RiZ4PqTCKGR0DvOlR0yB6MJwxaO_6yJ9R8J2v5fXdoI="
+    AIRFLOW__WEBSERVER__SECRET_KEY: "ecom-pipeline-secret"
+
+    # ── DAG behaviour ─────────────────────────────────────────────────────────
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__SCHEDULER__CATCHUP_BY_DEFAULT: "false"
+    AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: 30
+
+    # ── Parallelism ───────────────────────────────────────────────────────────
+    # LocalExecutor can run up to PARALLELISM tasks simultaneously.
+    # Tune down on a laptop; raise on a dev server.
+    AIRFLOW__CORE__PARALLELISM: 8
+    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: 8
+    AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG: 3
+
+    # ── API auth ──────────────────────────────────────────────────────────────
     AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session"
-    AIRFLOW__WEBSERVER__SECRET_KEY: "ecom-pipeline-secret"
+
+    # ── Logging ───────────────────────────────────────────────────────────────
+    AIRFLOW__LOGGING__BASE_LOG_FOLDER: /opt/airflow/logs
+    AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
+
   volumes:
+    # DAGs — bind mount so edits on the host are picked up within 30 s
     - ../airflow/dags:/opt/airflow/dags
+    # Logs — named volume (no need to browse logs from the host)
     - airflow-logs:/opt/airflow/logs
-    - airflow-plugins:/opt/airflow/plugins
+    # Plugins — bind mount so custom operators/hooks can be dropped in
+    - ../airflow/plugins:/opt/airflow/plugins
+    # Custom airflow.cfg overrides (optional; file must exist or mount fails)
+    - ../airflow/config:/opt/airflow/config:ro
+
   depends_on:
     airflow-postgres:
-      condition: service_healthy
-    airflow-redis:
       condition: service_healthy
   networks:
     - ecom-net
@@ -109,9 +141,10 @@ volumes:
   clickhouse-data:
   minio-data:
   elasticsearch-data:
+  kibana-data:
+  logstash-data:
   airflow-postgres-data:
   airflow-logs:
-  airflow-plugins:
 
 networks:
   ecom-net:
@@ -329,43 +362,129 @@ services:
       - ecom-net
 
   # =========================================================================
-  # KAFKA CONNECT — Iceberg sink host
-  # REST API → http://localhost:8083  (also visible inside Kafka UI)
+  # KAFKA CONNECT 7.6.1 — Iceberg sink + Avro/Schema Registry
+  # REST API → http://localhost:8083  (also visible inside Kafka UI at :8085)
+  #
+  # Plugin installation flow:
+  #   docker/kafka-connect/install-connectors.sh
+  #     └─ confluent-hub install tabular/iceberg-kafka-connect:0.6.19
+  #         └─ exec /etc/confluent/docker/run  (becomes PID 1)
+  #
+  # First boot is slow (~2–4 min) while the Iceberg plugin downloads.
+  # Subsequent restarts are instant (plugin is cached in the Docker volume).
+  # Set CONNECT_SKIP_HUB_INSTALL=true to bypass download (pre-baked image).
   # =========================================================================
   kafka-connect:
     image: confluentinc/cp-kafka-connect:7.6.1
     hostname: kafka-connect
     container_name: kafka-connect
+    # Run install script first; script ends with `exec /etc/confluent/docker/run`
+    command: ["bash", "/scripts/install-connectors.sh"]
     depends_on:
       schema-registry:
+        condition: service_healthy
+      # Iceberg sink needs the REST catalog to be reachable at startup
+      # so it can validate the warehouse path and catalog config.
+      iceberg-rest:
+        condition: service_healthy
+      # minio must be healthy before iceberg-rest, but also listed here
+      # so Kafka Connect can resolve the S3 endpoint on its own if needed.
+      minio:
         condition: service_healthy
     ports:
       - "8083:8083"
     environment:
+      # ---------------------------------------------------------------
+      # Bootstrap — use the shared YAML anchor (kafka-1:29092,kafka-2:29093)
+      # ---------------------------------------------------------------
       CONNECT_BOOTSTRAP_SERVERS: *kafka-brokers
       CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect
       CONNECT_REST_PORT: 8083
-      CONNECT_GROUP_ID: ecom-connect-group
-      CONNECT_CONFIG_STORAGE_TOPIC: _connect-configs
-      CONNECT_OFFSET_STORAGE_TOPIC: _connect-offsets
-      CONNECT_STATUS_STORAGE_TOPIC: _connect-status
+
+      # ---------------------------------------------------------------
+      # Connect cluster identity
+      # All connectors in this worker share these internal topics.
+      # Replication factor 2 = survives one broker failure (2 brokers total).
+      # ---------------------------------------------------------------
+      CONNECT_GROUP_ID: connect-cluster
+      CONNECT_CONFIG_STORAGE_TOPIC: connect-configs
+      CONNECT_OFFSET_STORAGE_TOPIC: connect-offsets
+      CONNECT_STATUS_STORAGE_TOPIC: connect-status
       CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 2
       CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 2
       CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 2
+
+      # ---------------------------------------------------------------
+      # Converters
+      # Key  : StringConverter — Flink writes event_id as a plain string key.
+      #         Using AvroConverter here would require a schema entry for
+      #         every key, which Flink's KafkaSink does not register.
+      # Value: AvroConverter + Schema Registry — matches the ClickstreamEvent
+      #         Avro schema registered by the Flink job.
+      # ---------------------------------------------------------------
       CONNECT_KEY_CONVERTER: org.apache.kafka.connect.storage.StringConverter
       CONNECT_VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
       CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+
+      # Internal topics (config/offset/status) always use JSON — they
+      # do not go through Avro serialisation.
+      CONNECT_INTERNAL_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_INTERNAL_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+
+      # ---------------------------------------------------------------
+      # Plugin discovery
+      # Confluent Hub components land in /usr/share/confluent-hub-components.
+      # /connectors holds any manually dropped JARs (volume mount below).
+      # ---------------------------------------------------------------
       CONNECT_PLUGIN_PATH: "/usr/share/java,/usr/share/confluent-hub-components,/connectors"
+
+      # ---------------------------------------------------------------
+      # Producer tuning — durability for the Iceberg sink's offset commits
+      # ---------------------------------------------------------------
+      CONNECT_PRODUCER_ACKS: "all"
+      CONNECT_PRODUCER_ENABLE_IDEMPOTENCE: "true"
+      CONNECT_PRODUCER_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION: 1
+
+      # ---------------------------------------------------------------
+      # Plugin installer settings (passed through to install-connectors.sh)
+      # ---------------------------------------------------------------
+      ICEBERG_PLUGIN_VERSION: "0.6.19"
+      # Set to "true" once the image is pre-baked with the plugin
+      CONNECT_SKIP_HUB_INSTALL: "false"
+
+      # ---------------------------------------------------------------
+      # Iceberg catalog defaults at the worker level
+      # These become the default for all Iceberg sink connectors.
+      # Individual connector configs can override any of these.
+      # ---------------------------------------------------------------
+      # REST catalog endpoint (inside the Docker network)
+      CONNECT_CONNECTOR_CLIENT_CONFIG_OVERRIDE_POLICY: All
+      # AWS / S3 credentials — passed to the Iceberg FileIO layer
+      AWS_ACCESS_KEY_ID: minio
+      AWS_SECRET_ACCESS_KEY: minio123
+      AWS_REGION: us-east-1
+
+      # ---------------------------------------------------------------
+      # Logging
+      # ---------------------------------------------------------------
       CONNECT_LOG4J_ROOT_LOGLEVEL: WARN
+      CONNECT_LOG4J_LOGGERS: "io.tabular.iceberg=INFO,org.apache.iceberg=INFO"
+
     volumes:
+      # Install script (read-only — only executed, never modified at runtime)
+      - ./kafka-connect:/scripts:ro
+      # Manually dropped connector JARs (alternative to Hub install)
       - ../kafka-connect:/connectors
     networks:
       - ecom-net
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8083/ || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/connector-plugins || exit 1"]
       interval: 30s
       timeout: 10s
-      retries: 5
+      retries: 10
+      # Give the first boot enough time to download and install the plugin
+      # (~2–4 minutes for the Iceberg connector + its transitive JARs).
+      start_period: 300s
 
   # =========================================================================
   # APACHE FLINK 1.19
@@ -481,22 +600,35 @@ services:
 
   # =========================================================================
   # CLICKHOUSE 24 — historical OLAP
-  # HTTP / Play UI → http://localhost:8123/play
-  # ch-ui          → http://localhost:8124
+  # HTTP / Play UI  → http://localhost:8123/play
+  # Native protocol → localhost:9000  (JDBC, clickhouse-client, Flink sink)
+  # ch-ui           → http://localhost:8124
+  #
+  # Config overrides (deep-merged at startup):
+  #   clickhouse/config/config.xml → /etc/clickhouse-server/config.d/
+  #   clickhouse/config/users.xml  → /etc/clickhouse-server/users.d/
+  # SQL init scripts:
+  #   clickhouse/init/*.sql        → /docker-entrypoint-initdb.d/
   # =========================================================================
   clickhouse:
     image: clickhouse/clickhouse-server:24.3
     hostname: clickhouse
     container_name: clickhouse
     ports:
-      - "8123:8123"
+      - "8123:8123"   # HTTP interface + Play UI (/play)
+      - "9000:9000"   # Native binary protocol (JDBC / clickhouse-client / Flink)
     environment:
       CLICKHOUSE_DB: ecom
       CLICKHOUSE_USER: default
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     volumes:
       - clickhouse-data:/var/lib/clickhouse
-      - ../clickhouse:/docker-entrypoint-initdb.d
+      # Server config override: memory, thread pool, Kafka consumer defaults
+      - ../clickhouse/config/config.xml:/etc/clickhouse-server/config.d/custom.xml:ro
+      # User / profile / quota config: default user (no password), max_memory_usage
+      - ../clickhouse/config/users.xml:/etc/clickhouse-server/users.d/custom.xml:ro
+      # SQL init scripts run once on first boot (create tables, materialized views, etc.)
+      - ../clickhouse/init:/docker-entrypoint-initdb.d:ro
     ulimits:
       nofile:
         soft: 262144
@@ -508,6 +640,36 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
+
+  # -------------------------------------------------------------------------
+  # CLICKHOUSE CLIENT — optional interactive SQL shell
+  #
+  # Not started by default.  Launch on demand with:
+  #   docker compose --profile tools run --rm clickhouse-client
+  #
+  # Or, if the server is already running, exec into it directly:
+  #   docker compose exec clickhouse clickhouse-client
+  # -------------------------------------------------------------------------
+  clickhouse-client:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: clickhouse-client
+    entrypoint:
+      - clickhouse-client
+      - --host=clickhouse
+      - --port=9000
+      - --user=default
+      - --database=ecom
+      - --multiline           # allow multi-line queries in interactive mode
+      - --highlight=1
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    networks:
+      - ecom-net
+    profiles:
+      - tools                 # only starts with: docker compose --profile tools …
+    stdin_open: true          # keep STDIN open for interactive queries
+    tty: true                 # allocate a pseudo-TTY (colour prompts, etc.)
 
   # ClickHouse management UI — http://localhost:8124
   clickhouse-ui:
@@ -527,19 +689,30 @@ services:
 
   # =========================================================================
   # MINIO — S3-compatible object store
-  # Console → http://localhost:9001  (minioadmin / minioadmin)
-  # API     → localhost:9000         (used internally by Flink & Iceberg)
+  # Console → http://localhost:9001  (minio / minio123)
+  # S3 API  → host:9002 → container:9000  (Flink & Iceberg use minio:9000 internally)
+  #
+  # NOTE: host port 9000 is occupied by ClickHouse native protocol.
+  #       The S3 API is exposed on host:9002 for external tools (mc, boto3, etc.).
+  #       Containers inside the Docker network always reach MinIO at minio:9000.
+  #
+  # Buckets created on first boot by minio-setup:
+  #   warehouse          → Iceberg table data + metadata (primary lakehouse bucket)
+  #   flink-ckpt         → Flink checkpoint storage
+  #   flink-savepoints   → Flink savepoint storage
   # =========================================================================
   minio:
     image: minio/minio:latest
     hostname: minio
     container_name: minio
     ports:
-      - "9002:9000"
-      - "9001:9001"
+      - "9002:9000"   # S3 API — host:9002 because host:9000 is ClickHouse native
+      - "9001:9001"   # Web console
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio123
+      # Site name shown in the console header
+      MINIO_SITE_NAME: ecom-lakehouse
     command: server /data --console-address ":9001"
     volumes:
       - minio-data:/data
@@ -551,7 +724,8 @@ services:
       timeout: 10s
       retries: 5
 
-  # Creates buckets on first boot
+  # One-shot container: creates all required buckets on first boot.
+  # Safe to re-run — mc mb --ignore-existing is idempotent.
   minio-setup:
     image: minio/mc:latest
     container_name: minio-setup
@@ -561,35 +735,101 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        mc alias set local http://minio:9000 minioadmin minioadmin
+        mc alias set local http://minio:9000 minio minio123
+
+        # Primary Iceberg lakehouse bucket
+        mc mb local/warehouse          --ignore-existing
+
+        # Flink state backend buckets
         mc mb local/flink-ckpt         --ignore-existing
         mc mb local/flink-savepoints   --ignore-existing
-        mc mb local/iceberg-warehouse  --ignore-existing
-        echo "MinIO buckets ready."
+
+        # Apply a lifecycle policy: auto-expire orphaned Flink checkpoint parts
+        # after 7 days (full checkpoints are retained via savepoints).
+        mc ilm add --expiry-days 7 local/flink-ckpt
+
+        echo "=== MinIO buckets ready ==="
+        mc ls local/
     networks:
       - ecom-net
 
   # =========================================================================
   # ICEBERG REST CATALOG — http://localhost:8181
+  #
+  # Implements the Iceberg REST Catalog spec (v1).
+  # Data files  → MinIO  s3://warehouse/
+  # Metadata DB → druid-postgres (shared), database=druid, schema=public
+  #               Tables created automatically on first start:
+  #                 iceberg_tables, iceberg_namespace_properties
+  #
+  # ENV VAR NAMING CONVENTION (tabulario/iceberg-rest image):
+  #   CATALOG_<PROP>  →  catalog.<prop>  (underscores → dots)
+  #   CATALOG_<A>__<B> →  catalog.<a>-<b>  (double-underscore → hyphen)
+  #   Example: CATALOG_IO__IMPL → catalog.io-impl
   # =========================================================================
   iceberg-rest:
-    image: tabulario/iceberg-rest:0.10.0
+    image: tabulario/iceberg-rest:latest
     hostname: iceberg-rest
     container_name: iceberg-rest
     depends_on:
       minio:
         condition: service_healthy
+      druid-postgres:
+        condition: service_healthy   # JDBC catalog needs Postgres on first start
     ports:
       - "8181:8181"
     environment:
-      CATALOG_WAREHOUSE: s3://iceberg-warehouse/
+      # ------------------------------------------------------------------
+      # JDBC catalog backend — stores namespace + table metadata in Postgres
+      # ------------------------------------------------------------------
+      # Switch from the default in-memory catalog to JDBC so metadata
+      # survives container restarts.  The JDBC catalog creates its own
+      # tables (iceberg_tables, iceberg_namespace_properties) alongside
+      # Druid's metadata in the same 'druid' database.
+      CATALOG_CATALOG__IMPL: org.apache.iceberg.jdbc.JdbcCatalog
+
+      # Connection to the shared druid-postgres instance.
+      # Uses the druid superuser which owns the druid database → full DDL rights.
+      CATALOG_URI: "jdbc:postgresql://druid-postgres:5432/druid"
+      CATALOG_JDBC_USER: druid
+      CATALOG_JDBC_PASSWORD: druid
+
+      # ------------------------------------------------------------------
+      # Warehouse & data file storage — MinIO S3-compatible
+      # ------------------------------------------------------------------
+      # All Iceberg data and metadata files land under s3://warehouse/.
+      # Namespace directories are created on first table write.
+      CATALOG_WAREHOUSE: s3://warehouse/
+
+      # S3FileIO is the standard Iceberg I/O layer for S3-compatible stores.
       CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+
+      # Point to the internal Docker network hostname — containers reach
+      # MinIO at minio:9000 regardless of the host port mapping (9002).
       CATALOG_S3_ENDPOINT: http://minio:9000
-      CATALOG_S3_ACCESS__KEY__ID: minioadmin
-      CATALOG_S3_SECRET__ACCESS__KEY: minioadmin
+
+      CATALOG_S3_ACCESS__KEY__ID: minio
+      CATALOG_S3_SECRET__ACCESS__KEY: minio123
+
+      # Required for MinIO path-style addressing (vs. virtual-hosted style
+      # used by AWS).  Without this, bucket names are prepended as a
+      # subdomain, which MinIO does not support by default.
       CATALOG_S3_PATH__STYLE__ACCESS: "true"
+
+      # Disable SSL verification — MinIO runs plain HTTP in local dev.
+      CATALOG_S3_SSL__ENABLED: "false"
+
+      # ------------------------------------------------------------------
+      # REST server settings
+      # ------------------------------------------------------------------
+      REST_PORT: 8181
     networks:
       - ecom-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8181/v1/config || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
   # =========================================================================
   # APACHE AIRFLOW 2.9 — orchestration
@@ -615,31 +855,50 @@ services:
       timeout: 5s
       retries: 5
 
-  airflow-redis:
-    image: redis:7-alpine
-    hostname: airflow-redis
-    container_name: airflow-redis
-    networks:
-      - ecom-net
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
+  # ── airflow-init ────────────────────────────────────────────────────────────
+  # One-shot container: migrates the metadata DB and creates the admin user.
+  # Runs to completion before webserver and scheduler start.
+  # Re-running is safe — `db migrate` is idempotent; `users create` skips
+  # existing users.  Set restart: on-failure so compose retries if postgres
+  # is not yet accepting connections on the first attempt.
   airflow-init:
     <<: *airflow-common
     container_name: airflow-init
+    # Override depends_on from anchor — no redis needed with LocalExecutor
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
+        set -e
+        echo "=== Airflow DB migration ==="
         airflow db migrate
+
+        echo "=== Creating admin user (idempotent) ==="
         airflow users create \
-          --username admin --password admin \
-          --firstname Admin --lastname Admin \
-          --role Admin --email admin@example.com
+          --username admin \
+          --password admin \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@ecom-pipeline.local || true
+
+        echo "=== Creating pipeline connections ==="
+        airflow connections add --conn-id postgres_default \
+          --conn-type postgres \
+          --conn-host airflow-postgres \
+          --conn-schema airflow \
+          --conn-login airflow \
+          --conn-password airflow \
+          --conn-port 5432 || true
+
+        echo "=== Airflow init complete ==="
     restart: on-failure
 
+  # ── airflow-webserver ────────────────────────────────────────────────────────
+  # Web UI + REST API.  Gunicorn serves 2 worker processes — enough for
+  # local dev.  Raise AIRFLOW__WEBSERVER__WORKERS for concurrent API clients.
   airflow-webserver:
     <<: *airflow-common
     hostname: airflow-webserver
@@ -648,85 +907,121 @@ services:
     ports:
       - "8080:8080"
     environment:
-      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      # Webserver-specific overrides on top of the anchor
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
-      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@airflow-postgres/airflow
-      AIRFLOW__CELERY__BROKER_URL: redis://:@airflow-redis:6379/0
       AIRFLOW__CORE__FERNET_KEY: "RiZ4PqTCKGR0DvOlR0yB6MJwxaO_6yJ9R8J2v5fXdoI="
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session"
       AIRFLOW__WEBSERVER__SECRET_KEY: "ecom-pipeline-secret"
       AIRFLOW__WEBSERVER__WORKERS: "2"
-      GUNICORN_CMD_ARGS: "--timeout 300 --workers 2"
+      # Extend Gunicorn request timeout for long-running DAG trigger API calls
+      GUNICORN_CMD_ARGS: "--timeout 300 --workers 2 --worker-class sync"
     depends_on:
       airflow-postgres:
-        condition: service_healthy
-      airflow-redis:
         condition: service_healthy
       airflow-init:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health | grep -q healthy || exit 1"]
       interval: 30s
       timeout: 15s
       retries: 10
+      start_period: 60s
 
+  # ── airflow-scheduler ────────────────────────────────────────────────────────
+  # With LocalExecutor, the scheduler both schedules and executes tasks
+  # (each task runs as a subprocess of the scheduler container).
+  # No separate Celery worker container needed.
   airflow-scheduler:
     <<: *airflow-common
     hostname: airflow-scheduler
     container_name: airflow-scheduler
     command: scheduler
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+      AIRFLOW__CORE__FERNET_KEY: "RiZ4PqTCKGR0DvOlR0yB6MJwxaO_6yJ9R8J2v5fXdoI="
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__SCHEDULER__CATCHUP_BY_DEFAULT: "false"
+      AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: 30
     depends_on:
       airflow-postgres:
         condition: service_healthy
-      airflow-redis:
-        condition: service_healthy
       airflow-init:
         condition: service_completed_successfully
-
-  airflow-worker:
-    <<: *airflow-common
-    hostname: airflow-worker
-    container_name: airflow-worker
-    command: celery worker
-    depends_on:
-      airflow-postgres:
-        condition: service_healthy
-      airflow-redis:
-        condition: service_healthy
-      airflow-init:
-        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname $(hostname) || exit 1"]
+      interval: 60s
+      timeout: 30s
+      retries: 5
+      start_period: 90s
 
   # =========================================================================
-  # ELK STACK 8.13 — single-pane observability
-  # Kibana → http://localhost:5601
+  # ELK STACK 8.17 — single-pane observability
+  # Kibana          → http://localhost:5601
+  # Elasticsearch   → http://localhost:9200
+  # Logstash Beats  → localhost:5044  |  Monitoring API → localhost:9600
+  #
+  # Version note: using 8.17.0 (current LTS patch) rather than 8.13.0 in
+  # the original spec — all three must stay at the same minor version.
   # =========================================================================
+
+  # -------------------------------------------------------------------------
+  # ELASTICSEARCH — single-node, security disabled for local dev
+  # Persistent data → named volume elasticsearch-data
+  # -------------------------------------------------------------------------
   elasticsearch:
     image: elastic/elasticsearch:8.17.0
     hostname: elasticsearch
     container_name: elasticsearch
     ports:
       - "9200:9200"
+      - "9300:9300"   # inter-node transport (unused in single-node, kept for tooling)
     environment:
+      # Single-node discovery — no cluster formation overhead
       discovery.type: single-node
+      cluster.name: ecom-observability
+      node.name: elasticsearch
+
+      # Security off for local dev — enable and configure certs before any
+      # shared or cloud deployment
       xpack.security.enabled: "false"
+      xpack.monitoring.collection.enabled: "false"
+
+      # Lock the JVM heap in RAM — prevents swap-induced GC pauses.
+      # Requires the memlock ulimit below.
       bootstrap.memory_lock: "true"
-      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+
+      # Heap: 2g / 2g matches the spec.  Rule of thumb: no more than 50 % of
+      # available RAM and never exceed 30 GB (compressed OOPs threshold).
+      ES_JAVA_OPTS: "-Xms2g -Xmx2g"
+
     ulimits:
       memlock:
         soft: -1
         hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
     volumes:
       - elasticsearch-data:/usr/share/elasticsearch/data
     networks:
       - ecom-net
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health?wait_for_status=yellow || exit 1"]
+      test: ["CMD-SHELL", "curl -sf 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s' || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 10
+      start_period: 60s
 
+  # -------------------------------------------------------------------------
+  # LOGSTASH — Beats → filter → Elasticsearch pipeline
+  # Pipeline configs: docker/elk/logstash/pipeline/{10-flink,11-kafka,12-clickhouse,20-metrics}.conf
+  # Persistent queue → logstash-data volume (survives restarts without data loss)
+  # -------------------------------------------------------------------------
   logstash:
     image: elastic/logstash:8.17.0
     hostname: logstash
@@ -735,16 +1030,33 @@ services:
       elasticsearch:
         condition: service_healthy
     ports:
-      - "5044:5044"
-      - "9600:9600"
+      - "5044:5044"   # Beats input (Filebeat → Logstash)
+      - "9600:9600"   # Logstash monitoring REST API
     environment:
-      LS_JAVA_OPTS: "-Xms256m -Xmx256m"
+      LS_JAVA_OPTS: "-Xms1g -Xmx1g"
+      # Disable X-Pack monitoring to reduce ES load in local dev
+      XPACK_MONITORING_ENABLED: "false"
+      # Persistent queue — survives Logstash restarts without dropping events
+      QUEUE_TYPE: persisted
+      QUEUE_MAX_BYTES: 1gb
+      PATH_QUEUE: /usr/share/logstash/data/queue
     volumes:
-      - ../elk/logstash-pipelines:/usr/share/logstash/pipeline:ro
+      - ./elk/logstash/pipeline:/usr/share/logstash/pipeline:ro
+      - logstash-data:/usr/share/logstash/data
     networks:
       - ecom-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9600/_node/stats || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 90s   # Logstash JVM startup + pipeline compile takes ~60 s
 
-  # Kibana — http://localhost:5601
+  # -------------------------------------------------------------------------
+  # KIBANA — dashboards, index patterns, alerting
+  # http://localhost:5601
+  # Persistent config → kibana-data volume (saves saved objects across restarts)
+  # -------------------------------------------------------------------------
   kibana:
     image: elastic/kibana:8.17.0
     hostname: kibana
@@ -756,16 +1068,31 @@ services:
       - "5601:5601"
     environment:
       ELASTICSEARCH_HOSTS: '["http://elasticsearch:9200"]'
+      # Kibana server identity — used in share URLs and alerts
+      SERVER_NAME: kibana
+      SERVER_PUBLICBASEURL: "http://localhost:5601"
+      # Security off — matches Elasticsearch
       XPACK_SECURITY_ENABLED: "false"
+      # Disable telemetry
+      TELEMETRY_ENABLED: "false"
+      XPACK_REPORTING_ENABLED: "false"
+    volumes:
+      - kibana-data:/usr/share/kibana/data
     networks:
       - ecom-net
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:5601/api/status || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:5601/api/status | grep -q '\"overall\":{\"level\":\"available\"' || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 10
+      start_period: 120s   # Kibana optimisation pass on first boot takes ~90 s
 
-  # Filebeat — collects stdout/stderr from all containers
+  # -------------------------------------------------------------------------
+  # FILEBEAT — ships container stdout/stderr to Logstash
+  # Reads Docker JSON log files from the host; adds container metadata.
+  # Config: elk/filebeat.yml
+  # Runs as root so it can read /var/lib/docker/containers/*.log
+  # -------------------------------------------------------------------------
   filebeat:
     image: elastic/filebeat:8.17.0
     hostname: filebeat
@@ -774,10 +1101,15 @@ services:
     depends_on:
       elasticsearch:
         condition: service_healthy
+      logstash:
+        condition: service_healthy
+      kibana:
+        condition: service_healthy   # needed for setup.dashboards + index pattern loading
     command: filebeat -e --strict.perms=false
     environment:
       ELASTICSEARCH_HOST: "http://elasticsearch:9200"
       KIBANA_HOST: "http://kibana:5601"
+      LOGSTASH_HOST: "logstash:5044"
     volumes:
       - ../elk/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
@@ -785,7 +1117,11 @@ services:
     networks:
       - ecom-net
 
-  # Metricbeat — system, docker, jvm, kafka JMX, clickhouse, Flink REST
+  # -------------------------------------------------------------------------
+  # METRICBEAT — collects system, Docker, Flink, ClickHouse, Kafka metrics
+  # Config: elk/metricbeat.yml
+  # Runs as root to access cgroup + proc filesystem for system metrics
+  # -------------------------------------------------------------------------
   metricbeat:
     image: elastic/metricbeat:8.17.0
     hostname: metricbeat
@@ -794,6 +1130,8 @@ services:
     depends_on:
       elasticsearch:
         condition: service_healthy
+      kibana:
+        condition: service_healthy   # needed for setup.dashboards
     command: metricbeat -e --strict.perms=false
     environment:
       ELASTICSEARCH_HOST: "http://elasticsearch:9200"
@@ -807,7 +1145,12 @@ services:
     networks:
       - ecom-net
 
-  # Heartbeat — synthetic checks: Druid SQL, CH, Flink JM, consumer lag
+  # -------------------------------------------------------------------------
+  # HEARTBEAT — synthetic HTTP checks for all pipeline services
+  # Monitors: Flink JM, Kafka Connect, Schema Registry, Druid, ClickHouse,
+  #           MinIO, Iceberg REST, Airflow, Kibana itself
+  # Config: elk/heartbeat.yml
+  # -------------------------------------------------------------------------
   heartbeat:
     image: elastic/heartbeat:8.17.0
     hostname: heartbeat
@@ -815,6 +1158,8 @@ services:
     depends_on:
       elasticsearch:
         condition: service_healthy
+      kibana:
+        condition: service_healthy   # needed for uptime app integration
     command: heartbeat -e --strict.perms=false
     environment:
       ELASTICSEARCH_HOST: "http://elasticsearch:9200"

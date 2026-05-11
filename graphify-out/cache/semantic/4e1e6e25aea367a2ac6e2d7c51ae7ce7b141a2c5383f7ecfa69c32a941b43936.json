@@ -1,0 +1,1 @@
+{"nodes": [{"id": "operators_validateandclean_validateandclean", "label": "ValidateAndClean (com.ecom.operators)", "file_type": "code", "source_file": "flink-app/src/main/java/com/ecom/operators/ValidateAndClean.java", "source_location": "line 40", "source_url": null, "captured_at": null, "author": null, "contributor": null}], "edges": [], "hyperedges": []}

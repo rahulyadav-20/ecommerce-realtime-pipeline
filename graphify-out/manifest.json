@@ -1,0 +1,82 @@
+{
+  "C:\\Users\\Rahul102.Yadav\\OneDrive - Reliance Corporate IT Park Limited\\Documents\\Project\\ecommerce-realtime-pipeline\\clickhouse\\02_kafka_engine.sql": {
+    "mtime": 1778499518.6623597,
+    "hash": "70bd196501a8058f54d1b5a98a7a9287"
+  },
+  "C:\\Users\\Rahul102.Yadav\\OneDrive - Reliance Corporate IT Park Limited\\Documents\\Project\\ecommerce-realtime-pipeline\\clickhouse\\init\\001_create_events_local.sql": {
+    "mtime": 1778499346.0615113,
+    "hash": "e468a411c1ea688956d04599a129f917"
+  },
+  "C:\\Users\\Rahul102.Yadav\\OneDrive - Reliance Corporate IT Park Limited\\Documents\\Project\\ecommerce-realtime-pipeline\\flink-app\\src\\main\\java\\com\\ecom\\EcomEtlJob.java": {
+    "mtime": 1778306459.8902664,
+    "hash": "b79ee0f4c99163a0fc32f96c98062df0"
+  },
+  "C:\\Users\\Rahul102.Yadav\\OneDrive - Reliance Corporate IT Park Limited\\Documents\\Project\\ecommerce-realtime-pipeline\\flink-app\\src\\main\\java\\com\\ecom\\etl\\EcomEtlJob.java": {
+    "mtime": 1778276083.4290037,
+    "hash": "02633e9757a159362556abf5160448ee"
+  },
+  "C:\\Users\\Rahul102.Yadav\\OneDrive - Reliance Corporate IT Park Limited\\Documents\\Project\\ecommerce-realtime-pipeline\\flink-app\\src\\main\\java\\com\\ecom\\etl\\JobConfig.java": {
+    "mtime": 1778271968.6673608,
+    "hash": "1c8a821fc5383d679dac39966c56b3b6"
+  },
+  "C:\\Users\\Rahul102.Yadav\\OneDrive - Reliance Corporate IT Park Limited\\Documents\\Project\\ecommerce-realtime-pipeline\\flink-app\\src\\main\\java\\com\\ecom\\functions\\DedupFunction.java": {
+    "mtime": 1778305381.059957,
+    "hash": "66141edcd547f1ef701722793712fcc2"
+  },
+  "C:\\Users\\Rahul102.Yadav\\OneDrive - Reliance Corporate IT Park Limited\\Documents\\Project\\ecommerce-realtime-pipeline\\flink-app\\src\\main\\java\\com\\ecom\\functions\\ValidateAndClean.java": {
+    "mtime": 1778303236.0060232,
+    "hash": "b99f555d15f69d78069c9c83e30883d6"
+  },
+  "C:\\Users\\Rahul102.Yadav\\OneDrive - Reliance Corporate IT Park Limited\\Documents\\Project\\ecommerce-realtime-pipeline\\flink-app\\src\\main\\java\\com\\ecom\\operators\\DedupFunction.java": {
+    "mtime": 1778273136.2892165,
+    "hash": "17a525d2ea4882ec67ab487f8fd3d4f6"
+  },
+  "C:\\Users\\Rahul102.Yadav\\OneDrive - Reliance Corporate IT Park Limited\\Documents\\Project\\ecommerce-realtime-pipeline\\flink-app\\src\\main\\java\\com\\ecom\\operators\\ValidateAndClean.java": {
+    "mtime": 1778274742.9353454,
+    "hash": "4c4b1523134b939299d36e481f665b79"
+  },
+  "C:\\Users\\Rahul102.Yadav\\OneDrive - Reliance Corporate IT Park Limited\\Documents\\Project\\ecommerce-realtime-pipeline\\flink-app\\src\\test\\java\\com\\ecom\\functions\\DedupFunctionTest.java": {
+    "mtime": 1778305633.2116008,
+    "hash": "c646028175dc94e10c8c9b17f2d62a9d"
+  },
+  "C:\\Users\\Rahul102.Yadav\\OneDrive - Reliance Corporate IT Park Limited\\Documents\\Project\\ecommerce-realtime-pipeline\\flink-app\\src\\test\\java\\com\\ecom\\functions\\ValidateAndCleanTest.java": {
+    "mtime": 1778304665.3683045,
+    "hash": "9f83ee94ecd1f8a2af7f9a9d5156df8c"
+  },
+  "C:\\Users\\Rahul102.Yadav\\OneDrive - Reliance Corporate IT Park Limited\\Documents\\Project\\ecommerce-realtime-pipeline\\src\\utils\\event_generator.py": {
+    "mtime": 1778271149.0849855,
+    "hash": "bf97f00547765ca9e09b14108118286b"
+  },
+  "C:\\Users\\Rahul102.Yadav\\OneDrive - Reliance Corporate IT Park Limited\\Documents\\Project\\ecommerce-realtime-pipeline\\README.md": {
+    "mtime": 1778263012.3991046,
+    "hash": "6749b20ab27720fcc26f67c93380458c"
+  },
+  "C:\\Users\\Rahul102.Yadav\\OneDrive - Reliance Corporate IT Park Limited\\Documents\\Project\\ecommerce-realtime-pipeline\\requirements.txt": {
+    "mtime": 1778271158.6628222,
+    "hash": "fc1966002be9f9f7d4b668f27d4050c7"
+  },
+  "C:\\Users\\Rahul102.Yadav\\OneDrive - Reliance Corporate IT Park Limited\\Documents\\Project\\ecommerce-realtime-pipeline\\docker\\docker-compose-phase1.yml": {
+    "mtime": 1778270171.4330473,
+    "hash": "b60c833d826c0f9ec531728235671d05"
+  },
+  "C:\\Users\\Rahul102.Yadav\\OneDrive - Reliance Corporate IT Park Limited\\Documents\\Project\\ecommerce-realtime-pipeline\\docker\\docker-compose.yml": {
+    "mtime": 1778498734.8990197,
+    "hash": "b08dd369a5b160490ae2ce8340ec9d4f"
+  },
+  "C:\\Users\\Rahul102.Yadav\\OneDrive - Reliance Corporate IT Park Limited\\Documents\\Project\\ecommerce-realtime-pipeline\\druid\\sample-queries.md": {
+    "mtime": 1778481663.594344,
+    "hash": "f1b752cb6c7e81338495e295c26cd388"
+  },
+  "C:\\Users\\Rahul102.Yadav\\OneDrive - Reliance Corporate IT Park Limited\\Documents\\Project\\ecommerce-realtime-pipeline\\elk\\filebeat.yml": {
+    "mtime": 1778265222.6863575,
+    "hash": "cc25d76c9892c51e4105cbf53dc1c1d0"
+  },
+  "C:\\Users\\Rahul102.Yadav\\OneDrive - Reliance Corporate IT Park Limited\\Documents\\Project\\ecommerce-realtime-pipeline\\elk\\heartbeat.yml": {
+    "mtime": 1778265321.0907114,
+    "hash": "e04a3374798b56c54e2111485f5e34f2"
+  },
+  "C:\\Users\\Rahul102.Yadav\\OneDrive - Reliance Corporate IT Park Limited\\Documents\\Project\\ecommerce-realtime-pipeline\\elk\\metricbeat.yml": {
+    "mtime": 1778265251.833663,
+    "hash": "6966acab9b2f3b909b1abd1cc09ea1dd"
+  }
+}

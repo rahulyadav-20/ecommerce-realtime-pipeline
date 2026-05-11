@@ -20,7 +20,8 @@
       "Bash(curl -sf \"http://localhost:8888/druid/indexer/v1/pendingTasks\")",
       "Bash(curl -sf -X POST http://localhost:8888/druid/indexer/v1/supervisor/ecommerce_events/terminate -H 'Content-Type: application/json')",
       "Bash(curl -sf -X POST http://localhost:8888/druid/indexer/v1/supervisor -H 'Content-Type: application/json' -d @druid/ingestion-spec.json)",
-      "Bash(curl -sf -X POST http://localhost:8888/druid/indexer/v1/supervisor/ecommerce_events/terminate -H \"Content-Type: application/json\")"
+      "Bash(curl -sf -X POST http://localhost:8888/druid/indexer/v1/supervisor/ecommerce_events/terminate -H \"Content-Type: application/json\")",
+      "Bash(python src/utils/event_generator.py --rate 80 --duration 20 --bootstrap localhost:9092 --schema-registry http://localhost:8081)"
     ]
   }
 }

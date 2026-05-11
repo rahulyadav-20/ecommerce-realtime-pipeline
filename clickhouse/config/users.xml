@@ -1,0 +1,147 @@
+<?xml version="1.0"?>
+<!--
+  ClickHouse user / profile / quota configuration — local dev.
+  Placed in /etc/clickhouse-server/users.d/ and deep-merged over the
+  image's built-in users.xml at startup.
+
+  Security note: the default user has NO PASSWORD and network access from
+  any IP (::/0).  This is intentional for a localhost-only Docker network.
+  Add a password and restrict networks before exposing to any shared environment.
+
+  Reference: https://clickhouse.com/docs/en/operations/access-rights
+-->
+<clickhouse>
+
+    <!-- ================================================================== -->
+    <!-- QUERY PROFILES                                                       -->
+    <!-- ================================================================== -->
+    <profiles>
+
+        <!--
+          default — applied to the `default` user and any user that does not
+          explicitly select a different profile.
+        -->
+        <default>
+            <!--
+                Per-query memory cap.  Queries that exceed this are killed
+                rather than causing the server to OOM.
+                4 GiB matches max_server_memory_usage in config.xml so that
+                a single runaway query can never starve other processes on a
+                dev laptop.
+            -->
+            <max_memory_usage>4294967296</max_memory_usage>
+
+            <!--
+                Allow the query to use up to 2× max_memory_usage by spilling
+                to disk (external sort / aggregation).
+            -->
+            <max_bytes_before_external_sort>2147483648</max_bytes_before_external_sort>
+            <max_bytes_before_external_group_by>2147483648</max_bytes_before_external_group_by>
+
+            <!--
+                Default number of threads a single SELECT may use.
+                Matches max_thread_pool_size in config.xml for a dev machine.
+            -->
+            <max_threads>8</max_threads>
+
+            <!--
+                Kafka consumer threads per table (mirrors server-level default
+                in config.xml for clarity — the more specific table-level
+                SETTINGS clause always wins).
+            -->
+            <kafka_num_consumers>4</kafka_num_consumers>
+
+            <!-- Allow DDL (CREATE / DROP / ALTER) from the default user.   -->
+            <allow_ddl>1</allow_ddl>
+
+            <!-- Allow experimental / not-yet-stable features in dev.       -->
+            <allow_experimental_object_type>1</allow_experimental_object_type>
+            <allow_experimental_annoy_index>0</allow_experimental_annoy_index>
+
+            <!-- Output format settings used by the HTTP Play UI.           -->
+            <output_format_pretty_max_rows>50000</output_format_pretty_max_rows>
+            <output_format_pretty_max_column_pad_width>25</output_format_pretty_max_column_pad_width>
+
+            <!-- Readonly = 0 → full read+write access.                     -->
+            <readonly>0</readonly>
+        </default>
+
+        <!-- readonly profile — useful for BI tools / dashboards            -->
+        <readonly>
+            <readonly>1</readonly>
+            <max_memory_usage>2147483648</max_memory_usage>
+            <max_threads>4</max_threads>
+        </readonly>
+
+    </profiles>
+
+    <!-- ================================================================== -->
+    <!-- USERS                                                                -->
+    <!-- ================================================================== -->
+    <users>
+
+        <!--
+          default — no-password local dev user.
+          Maps to the `ecom` database created via CLICKHOUSE_DB env var.
+        -->
+        <default>
+            <!-- Empty password tag = no password required.                 -->
+            <password></password>
+
+            <!-- Allow connections from any IP inside the Docker bridge net -->
+            <!-- and from the host machine (127.0.0.1 / ::1).               -->
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+
+            <profile>default</profile>
+            <quota>default</quota>
+
+            <!--
+                access_management = 1 lets this user run GRANT / REVOKE /
+                CREATE USER statements (needed for Airflow / Metabase setup).
+            -->
+            <access_management>1</access_management>
+
+            <!-- Named collection access (Kafka, S3, etc.)                  -->
+            <named_collection_control>1</named_collection_control>
+            <show_named_collections>1</show_named_collections>
+            <show_named_collections_secrets>0</show_named_collections_secrets>
+        </default>
+
+        <!--
+          clickhouse_client — a restricted user for the clickhouse-client
+          container.  Same permissions as default for local dev.
+        -->
+        <clickhouse_client>
+            <password></password>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <profile>default</profile>
+            <quota>default</quota>
+            <access_management>0</access_management>
+        </clickhouse_client>
+
+    </users>
+
+    <!-- ================================================================== -->
+    <!-- QUOTAS                                                               -->
+    <!-- ================================================================== -->
+    <quotas>
+        <!-- default — unlimited for local dev.                             -->
+        <default>
+            <interval>
+                <duration>3600</duration>
+                <queries>0</queries>
+                <query_selects>0</query_selects>
+                <query_inserts>0</query_inserts>
+                <errors>0</errors>
+                <result_rows>0</result_rows>
+                <read_rows>0</read_rows>
+                <execution_time>0</execution_time>
+            </interval>
+        </default>
+    </quotas>
+
+</clickhouse>

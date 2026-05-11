@@ -1,22 +1,115 @@
+# =============================================================================
+# filebeat.yml — container log collection for the ecom pipeline
+# Ships all Docker container logs to Logstash → Elasticsearch
+# Index pattern: logs-{service}-YYYY.MM.dd
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# INPUT — read Docker JSON log files from the host filesystem
+# -----------------------------------------------------------------------------
 filebeat.inputs:
   - type: container
     paths:
       - /var/lib/docker/containers/*/*.log
+
+    # Attach the originating container's labels, name, and image to every event.
+    # This is what populates container.name, container.image.name, etc. in ES.
     processors:
       - add_docker_metadata:
           host: "unix:///var/run/docker.sock"
+          match_fields: ["log.file.path"]
+
+      # Try to parse the message field as JSON (Flink, Java, Python all emit JSON logs
+      # when configured with a JSON layout).  Flattens top-level keys into the event.
       - decode_json_fields:
           fields: ["message"]
           target: ""
           overwrite_keys: true
+          add_error_key: false
 
+      # Tag events by the container's compose service name so Logstash can
+      # route them to per-service indices without additional regex.
+      - add_fields:
+          target: fields
+          fields:
+            pipeline: ecom-realtime
+      - copy_fields:
+          fields:
+            - from: container.labels.com_docker_compose_service
+              to: fields.service
+          fail_on_error: false
+
+# Merge multiline Java exception stack traces into a single event.
+# Applies before the decode_json_fields processor.
+multiline.pattern: '^[[:space:]]+(at|\.{3})[[:space:]]+\b|^Caused by:'
+multiline.negate: false
+multiline.match: after
+multiline.max_lines: 200
+multiline.timeout: 5s
+
+# -----------------------------------------------------------------------------
+# PROCESSORS (global — applied after per-input processors)
+# -----------------------------------------------------------------------------
 processors:
-  - add_host_metadata: ~
+  - add_host_metadata:
+      when.not.contains.tags: forwarded
 
+  # Normalize log level field — Flink, Java, Python all use different key names.
+  - rename:
+      fields:
+        - from: "level"
+          to: "log.level"
+        - from: "levelname"
+          to: "log.level"
+        - from: "severity"
+          to: "log.level"
+      ignore_missing: true
+      fail_on_error: false
+
+  # Drop noisy health-check log lines that add volume without signal
+  - drop_event:
+      when:
+        or:
+          - contains:
+              message: "GET /ping HTTP"
+          - contains:
+              message: "GET /minio/health"
+          - contains:
+              message: "/_cluster/health"
+          - contains:
+              message: "GET / HTTP/1.1\" 200"
+
+# -----------------------------------------------------------------------------
+# OUTPUT — send to Logstash for filtering and index routing
+# -----------------------------------------------------------------------------
 output.logstash:
-  hosts: ["logstash:5044"]
+  hosts: ["${LOGSTASH_HOST:logstash:5044}"]
+  # Compress events in transit (reduces network I/O by ~70 % for JSON logs)
+  compression_level: 3
+  # Bulk batch size — balance between latency and throughput
+  bulk_max_size: 512
 
+# -----------------------------------------------------------------------------
+# KIBANA — used only for setup.dashboards (runs once on startup)
+# -----------------------------------------------------------------------------
 setup.kibana:
-  host: "${KIBANA_HOST}"
+  host: "${KIBANA_HOST:http://kibana:5601}"
 
+setup.dashboards.enabled: true
+setup.dashboards.retry.enabled: true
+setup.dashboards.retry.interval: 10s
+setup.dashboards.retry.maximum: 20
+
+# -----------------------------------------------------------------------------
+# INDEX TEMPLATE
+# -----------------------------------------------------------------------------
+setup.template.enabled: true
+setup.template.name: "filebeat"
+setup.template.pattern: "filebeat-*"
+setup.ilm.enabled: false   # use explicit daily indices, not ILM, for simplicity
+
+# -----------------------------------------------------------------------------
+# LOGGING
+# -----------------------------------------------------------------------------
 logging.level: warning
+logging.to_files: false   # log to stderr only (Docker captures it)

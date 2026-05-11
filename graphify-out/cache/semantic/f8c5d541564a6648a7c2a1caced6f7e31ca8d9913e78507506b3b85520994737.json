@@ -1,0 +1,1 @@
+{"nodes": [{"id": "jobconfig_jobconfig", "label": "JobConfig", "file_type": "code", "source_file": "flink-app/src/main/java/com/ecom/etl/JobConfig.java", "source_location": "line 23", "source_url": null, "captured_at": null, "author": null, "contributor": null}], "edges": [], "hyperedges": []}

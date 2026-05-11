@@ -1,54 +1,173 @@
+# =============================================================================
+# heartbeat.yml — synthetic uptime monitoring for all pipeline services
+# Results appear in Kibana → Observability → Uptime
+# Index pattern: heartbeat-YYYY.MM.dd
+# =============================================================================
+
 heartbeat.monitors:
+
+  # ---------------------------------------------------------------------------
+  # STREAM PROCESSING — Flink
+  # ---------------------------------------------------------------------------
   - type: http
     id: flink-jobmanager
     name: "Flink Job Manager"
+    tags: ["flink", "stream-processing"]
     urls: ["http://flink-jobmanager:8081/overview"]
     schedule: "@every 30s"
+    check.response.status: [200]
+
+  # ---------------------------------------------------------------------------
+  # MESSAGE BUS — Kafka ecosystem
+  # ---------------------------------------------------------------------------
+  - type: http
+    id: schema-registry
+    name: "Schema Registry"
+    tags: ["kafka", "schema"]
+    urls: ["http://schema-registry:8081/subjects"]
+    schedule: "@every 30s"
+    check.response.status: [200]
 
   - type: http
     id: kafka-connect
     name: "Kafka Connect"
-    urls: ["http://kafka-connect:8083/"]
+    tags: ["kafka", "connect"]
+    urls: ["http://kafka-connect:8083/connector-plugins"]
     schedule: "@every 30s"
+    check.response.status: [200]
 
   - type: http
-    id: schema-registry
-    name: "Schema Registry"
-    urls: ["http://schema-registry:8081/subjects"]
-    schedule: "@every 30s"
+    id: kafka-ui
+    name: "Kafka UI"
+    tags: ["kafka", "ui"]
+    urls: ["http://kafka-ui:8080/api/clusters"]
+    schedule: "@every 60s"
+    check.response.status: [200]
 
+  # ---------------------------------------------------------------------------
+  # REAL-TIME OLAP — Druid
+  # ---------------------------------------------------------------------------
   - type: http
     id: druid-router
     name: "Druid Router"
+    tags: ["druid", "olap"]
     urls: ["http://druid-router:8888/status"]
     schedule: "@every 30s"
+    check.response.status: [200]
 
   - type: http
-    id: clickhouse
-    name: "ClickHouse"
+    id: druid-broker
+    name: "Druid Broker SQL"
+    tags: ["druid", "olap"]
+    # Quick SQL probe — returns immediately if no data; validates query path
+    urls: ["http://druid-broker:8082/druid/v2/sql"]
+    schedule: "@every 60s"
+    check.request:
+      method: POST
+      headers:
+        Content-Type: application/json
+      body: '{"query":"SELECT 1"}'
+    check.response.status: [200]
+
+  # ---------------------------------------------------------------------------
+  # HISTORICAL OLAP — ClickHouse
+  # ---------------------------------------------------------------------------
+  - type: http
+    id: clickhouse-http
+    name: "ClickHouse HTTP"
+    tags: ["clickhouse", "olap"]
     urls: ["http://clickhouse:8123/ping"]
     schedule: "@every 30s"
+    check.response.status: [200]
+    check.response.body: "Ok."
 
+  # ---------------------------------------------------------------------------
+  # LAKEHOUSE — MinIO + Iceberg REST
+  # ---------------------------------------------------------------------------
   - type: http
-    id: minio
-    name: "MinIO"
+    id: minio-health
+    name: "MinIO S3 API"
+    tags: ["minio", "storage"]
     urls: ["http://minio:9000/minio/health/live"]
     schedule: "@every 30s"
+    check.response.status: [200]
 
   - type: http
     id: iceberg-rest
     name: "Iceberg REST Catalog"
+    tags: ["iceberg", "catalog"]
     urls: ["http://iceberg-rest:8181/v1/config"]
     schedule: "@every 30s"
+    check.response.status: [200]
 
+  # ---------------------------------------------------------------------------
+  # ORCHESTRATION — Airflow
+  # ---------------------------------------------------------------------------
+  - type: http
+    id: airflow-webserver
+    name: "Airflow Webserver"
+    tags: ["airflow", "orchestration"]
+    urls: ["http://airflow-webserver:8080/health"]
+    schedule: "@every 30s"
+    check.response.status: [200]
+
+  # ---------------------------------------------------------------------------
+  # OBSERVABILITY — ELK itself
+  # ---------------------------------------------------------------------------
+  - type: http
+    id: kibana-status
+    name: "Kibana"
+    tags: ["elk", "observability"]
+    urls: ["http://kibana:5601/api/status"]
+    schedule: "@every 30s"
+    check.response.status: [200]
+
+  - type: http
+    id: elasticsearch-health
+    name: "Elasticsearch"
+    tags: ["elk", "observability"]
+    urls: ["http://elasticsearch:9200/_cluster/health"]
+    schedule: "@every 30s"
+    check.response.status: [200]
+
+  - type: http
+    id: logstash-node
+    name: "Logstash"
+    tags: ["elk", "observability"]
+    urls: ["http://logstash:9600/_node/stats"]
+    schedule: "@every 30s"
+    check.response.status: [200]
+
+# -----------------------------------------------------------------------------
+# OUTPUT
+# -----------------------------------------------------------------------------
 output.elasticsearch:
-  hosts: ["${ELASTICSEARCH_HOST}"]
+  hosts: ["${ELASTICSEARCH_HOST:http://elasticsearch:9200}"]
   index: "heartbeat-%{+YYYY.MM.dd}"
 
+# -----------------------------------------------------------------------------
+# KIBANA — Uptime app integration
+# -----------------------------------------------------------------------------
 setup.kibana:
-  host: "${KIBANA_HOST}"
+  host: "${KIBANA_HOST:http://kibana:5601}"
 
+setup.dashboards.enabled: true
+setup.dashboards.retry.enabled: true
+setup.dashboards.retry.interval: 15s
+setup.dashboards.retry.maximum: 20
+
+# -----------------------------------------------------------------------------
+# INDEX TEMPLATE
+# -----------------------------------------------------------------------------
 setup.template.name: "heartbeat"
 setup.template.pattern: "heartbeat-*"
+setup.template.settings:
+  index.number_of_shards: 1
+  index.number_of_replicas: 0
+setup.ilm.enabled: false
 
+# -----------------------------------------------------------------------------
+# LOGGING
+# -----------------------------------------------------------------------------
 logging.level: warning
+logging.to_files: false

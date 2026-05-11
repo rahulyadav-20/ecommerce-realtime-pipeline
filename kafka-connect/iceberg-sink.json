@@ -1,0 +1,95 @@
+{
+  "name": "iceberg-sink-events",
+  "config": {
+
+    "_comment_connector": "=== CONNECTOR IDENTITY ===",
+    "connector.class": "io.tabular.iceberg.connect.IcebergSinkConnector",
+
+    "_comment_tasks": "4 tasks = 1 per Kafka partition group; tune to match tasks.max ≤ topic partitions",
+    "tasks.max": "4",
+
+    "_comment_topics": "The clean/validated topic written by the Flink ETL job",
+    "topics": "ecommerce.events.clean.v1",
+
+    "_comment_table": "=== ICEBERG TABLE ROUTING ===",
+    "_comment_table_id": "Iceberg identifier: namespace=warehouse.silver (nested), table=events_clean",
+    "iceberg.tables": "warehouse.silver.events_clean",
+
+    "_comment_upsert": "Upsert mode performs an equality-delete on id-columns before inserting.",
+    "_comment_upsert2": "Requires Iceberg format-version=2 (row-level deletes). Handles Kafka",
+    "_comment_upsert3": "at-least-once redelivery: duplicate event_id → overwrite, not duplicate row.",
+    "iceberg.tables.upsert-mode-enabled": "true",
+    "iceberg.tables.id-columns": "event_id",
+
+    "_comment_format": "Format version 2 is required for upsert (equality deletes).",
+    "_comment_format2": "v1 tables only support append; setting this forces v2 on auto-create.",
+    "iceberg.tables.format-version": "2",
+
+    "_comment_autocreate": "Auto-create the Iceberg table on first record if it does not exist.",
+    "_comment_autocreate2": "Schema is inferred from the Avro value; columns map 1-to-1.",
+    "iceberg.tables.auto-create-enabled": "true",
+
+    "_comment_evolve": "Allow the table schema to widen automatically when the Avro schema",
+    "_comment_evolve2": "gains new optional fields (Flink schema evolution → Iceberg column add).",
+    "iceberg.tables.evolve-schema-enabled": "true",
+
+    "_comment_catalog": "=== ICEBERG REST CATALOG ===",
+    "iceberg.catalog.type": "rest",
+
+    "_comment_uri": "tabulario/iceberg-rest container on the Docker bridge network",
+    "iceberg.catalog.uri": "http://iceberg-rest:8181",
+
+    "_comment_warehouse": "S3 warehouse root — must match CATALOG_WAREHOUSE in iceberg-rest",
+    "iceberg.catalog.warehouse": "s3://warehouse",
+
+    "_comment_region": "AWS SDK v2 requires a region even for non-AWS S3-compatible stores.",
+    "iceberg.catalog.client.region": "us-east-1",
+
+    "_comment_s3": "=== S3 / MinIO CREDENTIALS ===",
+    "iceberg.catalog.s3.endpoint": "http://minio:9000",
+    "iceberg.catalog.s3.access-key-id": "minio",
+    "iceberg.catalog.s3.secret-access-key": "minio123",
+
+    "_comment_pathstyle": "MinIO uses path-style addressing (minio:9000/bucket/key).",
+    "_comment_pathstyle2": "Virtual-hosted style (bucket.minio:9000) requires DNS wildcard — not available in Docker.",
+    "iceberg.catalog.s3.path-style-access": "true",
+
+    "_comment_ssl": "Plain HTTP in local dev — no TLS verification needed",
+    "iceberg.catalog.s3.ssl-enabled": "false",
+
+    "_comment_commit": "=== COMMIT SETTINGS ===",
+    "_comment_commit2": "commit.interval-ms: how often the coordinator triggers a file commit.",
+    "_comment_commit3": "60 s balances latency vs small-file overhead. Lower (e.g. 30 s) for",
+    "_comment_commit4": "near-real-time dashboards; raise (e.g. 300 s) to reduce file count.",
+    "iceberg.control.commit.interval-ms": "60000",
+
+    "_comment_timeout": "Time the coordinator waits for all task workers to acknowledge a commit",
+    "_comment_timeout2": "before declaring it failed. Must be < commit.interval-ms.",
+    "iceberg.control.commit.timeout-ms": "30000",
+
+    "_comment_ctopic": "Dedicated control topic — avoids collisions when running multiple",
+    "_comment_ctopic2": "Iceberg sink connectors on the same worker.",
+    "iceberg.control.topic": "connect-control-iceberg",
+    "iceberg.control.group.id": "cg-iceberg-sink-events",
+
+    "_comment_converters": "=== CONVERTERS ===",
+    "_comment_converters2": "Value: AvroConverter reads ClickstreamEvent messages using the schema",
+    "_comment_converters3": "registered by the Flink job. Must match the producer-side serialiser.",
+    "value.converter": "io.confluent.connect.avro.AvroConverter",
+    "value.converter.schema.registry.url": "http://schema-registry:8081",
+    "value.converter.enhanced.avro.schema.support": "true",
+
+    "_comment_key": "Key: StringConverter — Flink writes event_id as plain string bytes.",
+    "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+
+    "_comment_errors": "=== ERROR HANDLING ===",
+    "_comment_errors2": "tolerance=all: log and skip bad records rather than halting the task.",
+    "_comment_errors3": "All skipped records land on the DLQ topic for forensic inspection.",
+    "errors.tolerance": "all",
+    "errors.log.enable": "true",
+    "errors.log.include.messages": "true",
+    "errors.deadletterqueue.topic.name": "dlq.iceberg-sink",
+    "errors.deadletterqueue.topic.replication.factor": "2",
+    "errors.deadletterqueue.context.headers.enable": "true"
+  }
+}

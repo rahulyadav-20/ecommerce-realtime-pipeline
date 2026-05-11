@@ -1,13 +1,30 @@
+# =============================================================================
+# metricbeat.yml — infrastructure and pipeline metrics for the ecom stack
+# Collects: host system, Docker, Flink REST, ClickHouse HTTP, Kafka offsets
+# Index pattern: metricbeat-YYYY.MM.dd
+# =============================================================================
+
 metricbeat.modules:
+
+  # ---------------------------------------------------------------------------
+  # HOST SYSTEM — CPU, memory, network, disk
+  # ---------------------------------------------------------------------------
   - module: system
     period: 30s
     metricsets:
       - cpu
+      - load        # 1/5/15-min load averages
       - memory
       - network
       - diskio
       - filesystem
+    cpu.metrics: ["percentages", "normalized_percentages"]
+    filesystem.ignore_types: ["tmpfs", "devtmpfs", "sysfs", "proc", "cgroup"]
 
+  # ---------------------------------------------------------------------------
+  # DOCKER — per-container CPU, memory, network, disk I/O
+  # Gives per-service resource utilisation inside Kibana dashboards.
+  # ---------------------------------------------------------------------------
   - module: docker
     period: 30s
     hosts: ["unix:///var/run/docker.sock"]
@@ -15,31 +32,127 @@ metricbeat.modules:
       - container
       - cpu
       - diskio
+      - event
+      - healthcheck
       - memory
       - network
+
+  # ---------------------------------------------------------------------------
+  # FLINK — JobManager REST API
+  # Exposes: running jobs, task managers, slot utilisation, checkpoint lag
+  # ---------------------------------------------------------------------------
+  - module: http
+    period: 30s
+    metricsets: ["json"]
+    hosts: ["http://flink-jobmanager:8081/overview"]
+    namespace: flink.overview
+    path: "/"
+    method: GET
 
   - module: http
     period: 30s
     metricsets: ["json"]
-    hosts:
-      - "http://flink-jobmanager:8081/overview"
-    namespace: flink
+    hosts: ["http://flink-jobmanager:8081/jobs/overview"]
+    namespace: flink.jobs
     path: "/"
     method: GET
 
+  # ---------------------------------------------------------------------------
+  # CLICKHOUSE — built-in HTTP /metrics endpoint (Prometheus format)
+  # Metricbeat's prometheus module scrapes it directly.
+  # Key metrics: query_count, insert_query_count, merge_tree_parts, memory_usage
+  # ---------------------------------------------------------------------------
+  - module: prometheus
+    period: 30s
+    hosts: ["clickhouse:8123"]
+    metrics_path: /metrics
+    namespace: clickhouse
+
+  # ---------------------------------------------------------------------------
+  # KAFKA — consumer group lag via Kafka module
+  # Tracks how far behind each consumer group is on each topic partition.
+  # Alert threshold: lag > 10 000 events on ecommerce.events.clean.v1
+  # ---------------------------------------------------------------------------
+  - module: kafka
+    period: 30s
+    hosts: ["kafka-1:29092", "kafka-2:29093"]
+    metricsets:
+      - partition
+      - consumer_group
+
+  # ---------------------------------------------------------------------------
+  # DRUID — router HTTP API
+  # Lightweight check: data source list and query count via Druid's SQL API
+  # ---------------------------------------------------------------------------
+  - module: http
+    period: 60s
+    metricsets: ["json"]
+    hosts: ["http://druid-router:8888/druid/v2/datasources"]
+    namespace: druid.datasources
+    path: "/"
+    method: GET
+
+  # ---------------------------------------------------------------------------
+  # MINIO — Prometheus-format /minio/v2/metrics/cluster endpoint
+  # Key metrics: s3_requests_total, s3_errors_total, disk_capacity_bytes
+  # ---------------------------------------------------------------------------
+  - module: prometheus
+    period: 60s
+    hosts: ["minio:9000"]
+    metrics_path: /minio/v2/metrics/cluster
+    namespace: minio
+
+  # ---------------------------------------------------------------------------
+  # KAFKA CONNECT — REST API stats
+  # ---------------------------------------------------------------------------
+  - module: http
+    period: 30s
+    metricsets: ["json"]
+    hosts: ["http://kafka-connect:8083/connectors"]
+    namespace: kafka_connect.connectors
+    path: "/"
+    method: GET
+
+# -----------------------------------------------------------------------------
+# PROCESSORS
+# -----------------------------------------------------------------------------
 processors:
-  - add_host_metadata: ~
+  - add_host_metadata:
+      netinfo.enabled: true
   - add_docker_metadata:
       host: "unix:///var/run/docker.sock"
+  - add_cloud_metadata: ~
 
+# -----------------------------------------------------------------------------
+# OUTPUT
+# -----------------------------------------------------------------------------
 output.elasticsearch:
-  hosts: ["${ELASTICSEARCH_HOST}"]
+  hosts: ["${ELASTICSEARCH_HOST:http://elasticsearch:9200}"]
   index: "metricbeat-%{+YYYY.MM.dd}"
 
+# -----------------------------------------------------------------------------
+# KIBANA — load built-in dashboards on first run
+# -----------------------------------------------------------------------------
 setup.kibana:
-  host: "${KIBANA_HOST}"
+  host: "${KIBANA_HOST:http://kibana:5601}"
 
+setup.dashboards.enabled: true
+setup.dashboards.retry.enabled: true
+setup.dashboards.retry.interval: 15s
+setup.dashboards.retry.maximum: 20
+
+# -----------------------------------------------------------------------------
+# INDEX TEMPLATE
+# -----------------------------------------------------------------------------
 setup.template.name: "metricbeat"
 setup.template.pattern: "metricbeat-*"
+setup.template.settings:
+  index.number_of_shards: 1
+  index.number_of_replicas: 0   # single-node ES — no replica possible
+setup.ilm.enabled: false
 
+# -----------------------------------------------------------------------------
+# LOGGING
+# -----------------------------------------------------------------------------
 logging.level: warning
+logging.to_files: false
