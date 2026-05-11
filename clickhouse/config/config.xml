@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <!--
-  ClickHouse server configuration override — local dev single-node.
+  ClickHouse server configuration override - local dev single-node.
   Placed in /etc/clickhouse-server/config.d/ and deep-merged over the
   image's built-in config.xml at startup.
 
@@ -8,17 +8,15 @@
 -->
 <clickhouse>
 
-    <!-- ------------------------------------------------------------------ -->
-    <!-- Network — listen on all interfaces for both protocols               -->
-    <!-- ------------------------------------------------------------------ -->
+    <!-- Network section -->
+    <!-- Network - listen on all interfaces for both protocols               -->
+    <!-- End network config -->
     <listen_host>0.0.0.0</listen_host>
 
     <!-- HTTP interface (port 8123) and Play UI are enabled by default.      -->
     <!-- Native TCP interface (port 9000) is enabled by default.             -->
 
-    <!-- ------------------------------------------------------------------ -->
-    <!-- Memory                                                              -->
-    <!-- ------------------------------------------------------------------ -->
+    <!-- Memory section -->
     <!--
         Hard ceiling on total server memory usage.
         4 GiB is safe for a laptop dev environment alongside Kafka + Flink.
@@ -33,9 +31,7 @@
     -->
     <max_server_memory_usage_to_ram_ratio>0.9</max_server_memory_usage_to_ram_ratio>
 
-    <!-- ------------------------------------------------------------------ -->
-    <!-- Thread pools                                                        -->
-    <!-- ------------------------------------------------------------------ -->
+    <!-- Thread pools section -->
     <!--
         Global thread pool shared by all queries.
         8 threads is appropriate for a 4-core dev laptop (2× cores).
@@ -49,9 +45,7 @@
     <!-- Background pool for Kafka / Kinesis consumer polling tasks.        -->
     <background_message_broker_schedule_pool_size>4</background_message_broker_schedule_pool_size>
 
-    <!-- ------------------------------------------------------------------ -->
-    <!-- Kafka engine defaults                                               -->
-    <!-- ------------------------------------------------------------------ -->
+    <!-- Kafka engine section -->
     <!--
         Default settings applied to every Kafka table that does not override
         them in its own SETTINGS clause.
@@ -71,9 +65,7 @@
         <max_retries>0</max_retries>
     </kafka>
 
-    <!-- ------------------------------------------------------------------ -->
-    <!-- Logging (keep dev logs concise)                                     -->
-    <!-- ------------------------------------------------------------------ -->
+    <!-- Logging section -->
     <logger>
         <level>warning</level>
         <log>/var/log/clickhouse-server/clickhouse-server.log</log>
@@ -83,17 +75,13 @@
         <console>1</console>
     </logger>
 
-    <!-- ------------------------------------------------------------------ -->
-    <!-- Storage paths (must match the volume mount in docker-compose)       -->
-    <!-- ------------------------------------------------------------------ -->
+    <!-- Storage paths section -->
     <path>/var/lib/clickhouse/</path>
     <tmp_path>/var/lib/clickhouse/tmp/</tmp_path>
     <user_files_path>/var/lib/clickhouse/user_files/</user_files_path>
     <format_schema_path>/var/lib/clickhouse/format_schemas/</format_schema_path>
 
-    <!-- ------------------------------------------------------------------ -->
-    <!-- Query log (useful for dev debugging, disabled in prod by default)   -->
-    <!-- ------------------------------------------------------------------ -->
+    <!-- Query log section -->
     <query_log>
         <database>system</database>
         <table>query_log</table>

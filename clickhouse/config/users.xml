@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <!--
-  ClickHouse user / profile / quota configuration — local dev.
+  ClickHouse user / profile / quota configuration - local dev.
   Placed in /etc/clickhouse-server/users.d/ and deep-merged over the
   image's built-in users.xml at startup.
 
@@ -18,7 +18,7 @@
     <profiles>
 
         <!--
-          default — applied to the `default` user and any user that does not
+          default - applied to the `default` user and any user that does not
           explicitly select a different profile.
         -->
         <default>
@@ -46,10 +46,10 @@
 
             <!--
                 Kafka consumer threads per table (mirrors server-level default
-                in config.xml for clarity — the more specific table-level
+                in config.xml for clarity - the more specific table-level
                 SETTINGS clause always wins).
             -->
-            <kafka_num_consumers>4</kafka_num_consumers>
+            <!-- <kafka_num_consumers>4</kafka_num_consumers> -->
 
             <!-- Allow DDL (CREATE / DROP / ALTER) from the default user.   -->
             <allow_ddl>1</allow_ddl>
@@ -66,7 +66,7 @@
             <readonly>0</readonly>
         </default>
 
-        <!-- readonly profile — useful for BI tools / dashboards            -->
+        <!-- readonly profile - useful for BI tools / dashboards            -->
         <readonly>
             <readonly>1</readonly>
             <max_memory_usage>2147483648</max_memory_usage>
@@ -81,7 +81,7 @@
     <users>
 
         <!--
-          default — no-password local dev user.
+          default - no-password local dev user.
           Maps to the `ecom` database created via CLICKHOUSE_DB env var.
         -->
         <default>
@@ -110,7 +110,7 @@
         </default>
 
         <!--
-          clickhouse_client — a restricted user for the clickhouse-client
+          clickhouse_client - a restricted user for the clickhouse-client
           container.  Same permissions as default for local dev.
         -->
         <clickhouse_client>
@@ -129,7 +129,7 @@
     <!-- QUOTAS                                                               -->
     <!-- ================================================================== -->
     <quotas>
-        <!-- default — unlimited for local dev.                             -->
+        <!-- default - unlimited for local dev.                             -->
         <default>
             <interval>
                 <duration>3600</duration>
