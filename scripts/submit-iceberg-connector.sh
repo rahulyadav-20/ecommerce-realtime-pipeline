@@ -22,13 +22,19 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Defaults
+# Load environment config (APP_ENV=local|docker|prod)
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-CONNECT_URL="${KAFKA_CONNECT_URL:-http://localhost:8083}"
-CATALOG_URL="${ICEBERG_CATALOG_URL:-http://localhost:8181}"
+# shellcheck source=scripts/config.sh
+source "${SCRIPT_DIR}/config.sh"
+
+# ---------------------------------------------------------------------------
+# Defaults (config.sh already set KAFKA_CONNECT_URL and ICEBERG_REST_URL)
+# ---------------------------------------------------------------------------
+CONNECT_URL="${KAFKA_CONNECT_URL}"
+CATALOG_URL="${ICEBERG_REST_URL}"
 CONFIG_FILE="${REPO_ROOT}/kafka-connect/iceberg-sink.json"
 DRY_RUN=false
 

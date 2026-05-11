@@ -39,11 +39,15 @@ Dependencies
 import argparse
 import json
 import logging
-import os
 import sys
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
+
+# ── Config (project root → config/) ──────────────────────────────────────────
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from config.settings import cfg  # noqa: E402
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -53,19 +57,19 @@ logging.basicConfig(
 )
 log = logging.getLogger("gdpr_right_to_forget")
 
-# ── Configuration ─────────────────────────────────────────────────────────────
-CATALOG_URL         = os.getenv("ICEBERG_REST_URL",       "http://iceberg-rest:8181")
-S3_ENDPOINT         = os.getenv("MINIO_ENDPOINT",         "http://minio:9000")
-S3_ACCESS_KEY       = os.getenv("MINIO_ACCESS_KEY",       "minio")
-S3_SECRET_KEY       = os.getenv("MINIO_SECRET_KEY",       "minio123")
-AUDIT_BUCKET        = os.getenv("GDPR_AUDIT_BUCKET",      "warehouse")
-AUDIT_PREFIX        = os.getenv("GDPR_AUDIT_PREFIX",      "gdpr-audit")
-ICEBERG_TABLE       = os.getenv("ICEBERG_EVENTS_TABLE",   "warehouse.silver.events_clean")
-CLICKHOUSE_URL      = os.getenv("CLICKHOUSE_URL",         "http://clickhouse:8123")
-CLICKHOUSE_USER     = os.getenv("CLICKHOUSE_USER",        "default")
-CLICKHOUSE_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD",    "")
-DRUID_URL           = os.getenv("DRUID_REST_URL",         "http://druid-router:8888")
-DRUID_DATASOURCE    = os.getenv("DRUID_DATASOURCE",       "ecommerce_events")
+# ── Resolved config values ────────────────────────────────────────────────────
+CATALOG_URL         = cfg.iceberg.rest_url
+S3_ENDPOINT         = cfg.minio.endpoint
+S3_ACCESS_KEY       = cfg.minio.access_key
+S3_SECRET_KEY       = cfg.minio.secret_key
+AUDIT_BUCKET        = cfg.minio.warehouse_bucket
+AUDIT_PREFIX        = cfg.pipeline.gdpr_audit_prefix
+ICEBERG_TABLE       = cfg.iceberg.events_table
+CLICKHOUSE_URL      = cfg.clickhouse.url
+CLICKHOUSE_USER     = cfg.clickhouse.user
+CLICKHOUSE_PASSWORD = cfg.clickhouse.password
+DRUID_URL           = cfg.druid.rest_url
+DRUID_DATASOURCE    = cfg.druid.datasource
 
 # Tables in ClickHouse that store user_id
 CLICKHOUSE_TABLES = [

@@ -19,7 +19,11 @@
 # =============================================================================
 set -euo pipefail
 
-SR_URL="${1:-${SCHEMA_REGISTRY_URL:-http://localhost:8081}}"
+# ── Load environment config (APP_ENV=local|docker|prod) ───────────────────────
+# shellcheck source=scripts/config.sh
+source "$(dirname "$0")/config.sh"
+
+SR_URL="${1:-${SCHEMA_REGISTRY_URL}}"
 SCHEMA_FILE="$(dirname "$0")/../schemas/clickstream-event.avsc"
 
 # Colours for output

@@ -37,7 +37,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import pathlib
 import random
 import signal
@@ -46,7 +45,12 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, Optional
+
+# ── Config (project root → config/) ──────────────────────────────────────────
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from config.settings import cfg  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Optional confluent-kafka import (skipped in --dry-run with missing lib)
@@ -479,17 +483,17 @@ def _parse_args() -> argparse.Namespace:
         help="Run for N seconds. 0 = run until Ctrl-C.",
     )
     p.add_argument(
-        "--topic", default="ecommerce.events.raw.v1",
-        help="Kafka topic to produce to.",
+        "--topic", default=cfg.kafka.raw_topic,
+        help=f"Kafka topic to produce to (default: {cfg.kafka.raw_topic}).",
     )
     p.add_argument(
-        "--bootstrap", default="localhost:9092",
-        help="Kafka bootstrap servers (comma-separated).",
+        "--bootstrap", default=cfg.kafka.bootstrap_servers,
+        help=f"Kafka bootstrap servers (default: {cfg.kafka.bootstrap_servers}).",
     )
     p.add_argument(
-        "--schema-registry", default="http://localhost:8081",
+        "--schema-registry", default=cfg.kafka.schema_registry_url,
         dest="schema_registry",
-        help="Confluent Schema Registry URL.",
+        help=f"Confluent Schema Registry URL (default: {cfg.kafka.schema_registry_url}).",
     )
     p.add_argument(
         "--sessions", type=int, default=50, metavar="N",

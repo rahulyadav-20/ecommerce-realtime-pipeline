@@ -38,10 +38,14 @@ Dependencies
 import argparse
 import json
 import logging
-import os
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
+
+# ── Config (project root → config/) ──────────────────────────────────────────
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from config.settings import cfg  # noqa: E402
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -51,17 +55,17 @@ logging.basicConfig(
 )
 log = logging.getLogger("dq_great_expectations")
 
-# ── Configuration ─────────────────────────────────────────────────────────────
-CATALOG_URL      = os.getenv("ICEBERG_REST_URL",       "http://iceberg-rest:8181")
-S3_ENDPOINT      = os.getenv("MINIO_ENDPOINT",         "http://minio:9000")
-S3_ACCESS_KEY    = os.getenv("MINIO_ACCESS_KEY",       "minio")
-S3_SECRET_KEY    = os.getenv("MINIO_SECRET_KEY",       "minio123")
-TABLE_ID         = os.getenv("ICEBERG_DQ_TABLE",       "warehouse.silver.events_clean")
-DQ_RESULTS_BUCKET= os.getenv("DQ_RESULTS_BUCKET",      "warehouse")
-DQ_RESULTS_PREFIX= os.getenv("DQ_RESULTS_PREFIX",      "dq-results/great-expectations")
-SLACK_WEBHOOK    = os.getenv("SLACK_WEBHOOK_URL",       "")
-LOOKBACK_HOURS   = int(os.getenv("DQ_LOOKBACK_HOURS",   "1"))
-SAMPLE_ROWS      = int(os.getenv("DQ_SAMPLE_ROWS",      "10000"))
+# ── Resolved config values ────────────────────────────────────────────────────
+CATALOG_URL       = cfg.iceberg.rest_url
+S3_ENDPOINT       = cfg.minio.endpoint
+S3_ACCESS_KEY     = cfg.minio.access_key
+S3_SECRET_KEY     = cfg.minio.secret_key
+TABLE_ID          = cfg.iceberg.events_table
+DQ_RESULTS_BUCKET = cfg.minio.dq_results_bucket
+DQ_RESULTS_PREFIX = cfg.pipeline.dq_results_prefix
+SLACK_WEBHOOK     = cfg.slack_webhook_url
+LOOKBACK_HOURS    = cfg.pipeline.dq_lookback_hours
+SAMPLE_ROWS       = cfg.pipeline.dq_sample_rows
 
 VALID_EVENT_TYPES = [
     "VIEW", "ADD_TO_CART", "REMOVE_CART", "WISHLIST",

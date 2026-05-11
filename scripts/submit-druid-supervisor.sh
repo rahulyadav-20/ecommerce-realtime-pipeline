@@ -21,7 +21,11 @@
 # =============================================================================
 set -euo pipefail
 
-ROUTER="${1:-${DRUID_ROUTER_URL:-http://localhost:8888}}"
+# ── Load environment config (APP_ENV=local|docker|prod) ───────────────────────
+# shellcheck source=scripts/config.sh
+source "$(dirname "$0")/config.sh"
+
+ROUTER="${1:-${DRUID_REST_URL}}"
 SPEC_FILE="$(cd "$(dirname "$0")/.." && pwd)/druid/ingestion-spec.json"
 DATASOURCE="ecommerce_events"
 SUPERVISOR_ID="$DATASOURCE"

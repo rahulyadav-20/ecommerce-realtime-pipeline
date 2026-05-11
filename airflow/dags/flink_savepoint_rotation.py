@@ -43,11 +43,15 @@ Dependencies
 import argparse
 import json
 import logging
-import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
+
+# ── Config (project root → config/) ──────────────────────────────────────────
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from config.settings import cfg  # noqa: E402
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -57,16 +61,16 @@ logging.basicConfig(
 )
 log = logging.getLogger("flink_savepoint_rotation")
 
-# ── Configuration ─────────────────────────────────────────────────────────────
-FLINK_URL         = os.getenv("FLINK_REST_URL",         "http://flink-jobmanager:8081")
-S3_ENDPOINT       = os.getenv("MINIO_ENDPOINT",         "http://minio:9000")
-S3_ACCESS_KEY     = os.getenv("MINIO_ACCESS_KEY",       "minio")
-S3_SECRET_KEY     = os.getenv("MINIO_SECRET_KEY",       "minio123")
-SAVEPOINT_BUCKET  = os.getenv("FLINK_SAVEPOINT_BUCKET", "flink-savepoints")
-SAVEPOINT_PREFIX  = os.getenv("FLINK_SAVEPOINT_PREFIX", "ecom")
-RETAIN_DAYS       = int(os.getenv("FLINK_SAVEPOINT_RETAIN_DAYS", "7"))
-MIN_KEEP          = int(os.getenv("FLINK_SAVEPOINT_MIN_KEEP",     "2"))
-SAVEPOINT_TIMEOUT = int(os.getenv("FLINK_SAVEPOINT_TIMEOUT_SEC",  "300"))
+# ── Resolved config values ────────────────────────────────────────────────────
+FLINK_URL         = cfg.flink.rest_url
+S3_ENDPOINT       = cfg.minio.endpoint
+S3_ACCESS_KEY     = cfg.minio.access_key
+S3_SECRET_KEY     = cfg.minio.secret_key
+SAVEPOINT_BUCKET  = cfg.minio.flink_savepoints_bucket
+SAVEPOINT_PREFIX  = "ecom"                                   # logical sub-prefix, not configurable per-env
+RETAIN_DAYS       = cfg.pipeline.savepoint_retain_days
+MIN_KEEP          = cfg.pipeline.savepoint_min_keep
+SAVEPOINT_TIMEOUT = cfg.pipeline.savepoint_timeout_sec
 
 # ── Shared state ──────────────────────────────────────────────────────────────
 _STATE: dict = {}

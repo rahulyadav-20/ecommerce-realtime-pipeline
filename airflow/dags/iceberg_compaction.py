@@ -31,10 +31,14 @@ Dependencies
 import argparse
 import json
 import logging
-import os
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
+
+# ── Config (project root → config/) ──────────────────────────────────────────
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from config.settings import cfg  # noqa: E402
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -44,14 +48,15 @@ logging.basicConfig(
 )
 log = logging.getLogger("iceberg_compaction")
 
-# ── Configuration (all overridable via environment variables) ─────────────────
-CATALOG_URL          = os.getenv("ICEBERG_REST_URL",       "http://iceberg-rest:8181")
-S3_ENDPOINT          = os.getenv("MINIO_ENDPOINT",         "http://minio:9000")
-S3_ACCESS_KEY        = os.getenv("MINIO_ACCESS_KEY",       "minio")
-S3_SECRET_KEY        = os.getenv("MINIO_SECRET_KEY",       "minio123")
-TABLE_ID             = os.getenv("ICEBERG_TABLE",          "warehouse.silver.events_clean")
-TARGET_FILE_SIZE_MB  = int(os.getenv("TARGET_FILE_SIZE_MB",  "128"))
-SNAPSHOT_RETAIN_DAYS = int(os.getenv("SNAPSHOT_RETAIN_DAYS", "7"))
+# ── Resolved config values (aliases for readability) ─────────────────────────
+CATALOG_URL          = cfg.iceberg.rest_url
+S3_ENDPOINT          = cfg.minio.endpoint
+S3_ACCESS_KEY        = cfg.minio.access_key
+S3_SECRET_KEY        = cfg.minio.secret_key
+TABLE_ID             = cfg.iceberg.events_table
+TARGET_FILE_SIZE_MB  = cfg.pipeline.target_file_size_mb
+SNAPSHOT_RETAIN_DAYS = cfg.pipeline.snapshot_retain_days
+MIN_FILE_SIZE_MB     = cfg.pipeline.min_file_size_mb
 MIN_FILE_SIZE_MB     = int(os.getenv("MIN_FILE_SIZE_MB",     "10"))
 
 # ── Catalog helper ────────────────────────────────────────────────────────────
