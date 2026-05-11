@@ -1,47 +1,186 @@
-# Druid environment — loaded by all Druid service containers via env_file
-# Matches our postgres + zookeeper service names in docker-compose.yml
+# =============================================================================
+# druid-environment — Apache Druid 36 runtime configuration
+# Loaded by all Druid service containers via `env_file: druid-environment`
+# in docker-compose.yml.
+#
+# Reference: https://druid.apache.org/docs/latest/configuration/index.html
+# =============================================================================
 
-# JVM heap
-DRUID_XMX=512m
-DRUID_XMS=512m
-DRUID_MAXNEWSIZE=128m
-DRUID_NEWSIZE=128m
-DRUID_MAXDIRECTMEMORYSIZE=1g
 
-# Metadata (PostgreSQL)
+# ─────────────────────────────────────────────────────────────────────────────
+# JVM HEAP & DIRECT MEMORY
+# Each Druid process (coordinator, broker, historical, middlemanager, router)
+# uses these settings.  The values below are conservative defaults for a
+# single-machine dev environment with 12–16 GB of host RAM.
+# Raise Xmx/XMS for the historical and broker on a dedicated server.
+# ─────────────────────────────────────────────────────────────────────────────
+
+DRUID_XMX=1g
+DRUID_XMS=1g
+DRUID_MAXNEWSIZE=256m
+DRUID_NEWSIZE=256m
+# Direct (off-heap) memory used for memory-mapped segment files and merge buffers
+DRUID_MAXDIRECTMEMORYSIZE=2g
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# METADATA STORAGE — PostgreSQL
+# Druid uses PostgreSQL to store segment metadata, supervisor state, task logs,
+# and coordinator assignments.  The druid-postgres service defined in
+# docker-compose.yml satisfies this dependency.
+# ─────────────────────────────────────────────────────────────────────────────
+
 druid_metadata_storage_type=postgresql
 druid_metadata_storage_connector_connectURI=jdbc:postgresql://druid-postgres:5432/druid
 druid_metadata_storage_connector_user=druid
 druid_metadata_storage_connector_password=druid
 
-# ZooKeeper
-druid_zk_service_host=zookeeper
 
-# Deep storage — local shared volume (swap for S3/MinIO in prod)
+# ─────────────────────────────────────────────────────────────────────────────
+# ZOOKEEPER — coordination for task assignment and leader election
+# ─────────────────────────────────────────────────────────────────────────────
+
+druid_zk_service_host=zookeeper
+druid_zk_service_port=2181
+druid_zk_paths_base=/druid
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DEEP STORAGE
+#
+# Two options are provided:
+#   [A] LOCAL  — default for local dev; data lives in the druid-data Docker volume.
+#   [B] S3/MinIO — comment out [A] and uncomment [B] to use MinIO as deep storage.
+#
+# Option [B] is recommended when MinIO is running so that historical nodes can
+# load segments without depending on a shared Docker volume.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── [A] Local shared volume (default) ───────────────────────────────────────
 druid_storage_type=local
 druid_storage_storageDirectory=/opt/shared/segments
 
-# Indexing logs
+# ── [B] MinIO / S3-compatible deep storage ──────────────────────────────────
+# To activate: comment out [A] above, uncomment the lines below.
+#
+# druid_storage_type=s3
+# druid_storage_bucket=warehouse
+# druid_storage_baseKey=druid/segments
+# druid_s3_accessKey=minio
+# druid_s3_secretKey=minio123
+# druid_s3_protocol=http
+# druid_s3_enablePathStyleAccess=true
+# druid_s3_endpoint_url=http://minio:9000
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INDEXING LOGS
+# Task logs written by MiddleManager peons.  Stored in the shared volume.
+# Switch to s3 log storage when using option [B] deep storage above.
+# ─────────────────────────────────────────────────────────────────────────────
+
 druid_indexer_logs_type=file
 druid_indexer_logs_directory=/opt/shared/indexing-logs
 
-# Extensions — single line, no folded YAML
-druid_extensions_loadList=["druid-histogram","druid-datasketches","druid-lookups-cached-global","postgresql-metadata-storage","druid-kafka-indexing-service","druid-avro-extensions"]
+# ── S3 log storage (uncomment with option [B]) ───────────────────────────────
+# druid_indexer_logs_type=s3
+# druid_indexer_logs_s3Bucket=warehouse
+# druid_indexer_logs_s3Prefix=druid/indexing-logs
 
-# Schema Registry — used by druid-avro-extensions for Confluent wire format decoding
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXTENSIONS
+# Only load extensions that are actually needed.  Unused extensions add startup
+# time and increase the risk of classpath conflicts.
+# ─────────────────────────────────────────────────────────────────────────────
+
+druid_extensions_loadList=["druid-histogram","druid-datasketches","druid-lookups-cached-global","postgresql-metadata-storage","druid-kafka-indexing-service","druid-avro-extensions","druid-s3-extensions"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SCHEMA REGISTRY
+# druid-avro-extensions uses this to fetch schemas when deserialising
+# Confluent-wire-format Avro messages from Kafka.
+# ─────────────────────────────────────────────────────────────────────────────
+
 druid_kafka_schema_registry_url=http://schema-registry:8081
 
-# Processing
-druid_processing_buffer_sizeBytes=200000000
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PROCESSING
+# buffer_sizeBytes: size of each merge buffer used during aggregation.
+#   200 MB is safe for dev; raise to 512 MB on servers with >32 GB RAM.
+# numMergeBuffers: number of concurrent merge operations (= broker parallelism).
+# numThreads: query processing threads per Historical / Broker.
+# ─────────────────────────────────────────────────────────────────────────────
+
+druid_processing_buffer_sizeBytes=209715200
 druid_processing_numThreads=2
 druid_processing_numMergeBuffers=2
+druid_processing_tmpDir=/opt/shared/tmp
 
-# Coordinator
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COORDINATOR
+# ─────────────────────────────────────────────────────────────────────────────
+
 druid_coordinator_balancer_strategy=cachingCost
+# How long the coordinator waits before starting a rebalance after startup
+druid_coordinator_startDelay=PT30S
+# How often the coordinator runs its main loop
+druid_coordinator_period=PT30S
 
-# MiddleManager peon JVM
-druid_indexer_runner_javaOptsArray=["-server","-Xmx512m","-Xms512m","-XX:MaxDirectMemorySize=1g","-Duser.timezone=UTC","-Dfile.encoding=UTF-8","-XX:+ExitOnOutOfMemoryError","-XX:+HeapDumpOnOutOfMemoryError"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MIDDLEMANAGER / PEON JVM
+# Each Kafka indexing task runs in its own peon (forked JVM) process.
+# javaOptsArray: JVM flags for the peon process.
+# fork_property_druid_processing_buffer_sizeBytes: merge buffer for each peon.
+# ─────────────────────────────────────────────────────────────────────────────
+
+druid_indexer_runner_javaOptsArray=["-server","-Xmx1g","-Xms512m","-XX:MaxDirectMemorySize=1g","-Duser.timezone=UTC","-Dfile.encoding=UTF-8","-XX:+ExitOnOutOfMemoryError","-XX:+HeapDumpOnOutOfMemoryError","-Djava.io.tmpdir=/opt/shared/tmp"]
 druid_indexer_fork_property_druid_processing_buffer_sizeBytes=134217728
 
-# Log4j — single-line XML
-DRUID_LOG4J=<?xml version="1.0" encoding="UTF-8" ?><Configuration status="WARN"><Appenders><Console name="Console" target="SYSTEM_OUT"><PatternLayout pattern="%d{ISO8601} %p [%t] %c - %m%n"/></Console></Appenders><Loggers><Root level="info"><AppenderRef ref="Console"/></Root><Logger name="org.apache.druid.jetty.RequestLog" additivity="false" level="DEBUG"><AppenderRef ref="Console"/></Logger></Loggers></Configuration>
+# Number of concurrent Kafka indexing tasks the MiddleManager will run
+druid_worker_capacity=4
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# QUERY SETTINGS
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maximum bytes a single query result set may occupy in the broker merge buffer
+druid_broker_http_maxQueuedBytes=50000000
+# Maximum number of rows a broker will buffer before spilling to disk
+druid_broker_cache_useCache=false
+druid_broker_cache_populateCache=false
+
+# SQL planner settings
+druid_sql_enable=true
+druid_sql_planner_maxTopNThreshold=1000
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HISTORICAL — segment cache
+# Segments are loaded from deep storage into this local cache directory.
+# ─────────────────────────────────────────────────────────────────────────────
+
+druid_segmentCache_locations=[{"path":"/opt/shared/segment-cache","maxSize":5368709120}]
+druid_server_maxSize=5368709120
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MONITORING & EMITTERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Emit metrics to the log (dev default).  Switch to "http" emitter for Prometheus.
+druid_emitter=noop
+# druid_emitter=logging
+# druid_emitter_logging_logLevel=info
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LOG4J — single-line XML (Druid requires it on one line)
+# ─────────────────────────────────────────────────────────────────────────────
+
+DRUID_LOG4J=<?xml version="1.0" encoding="UTF-8" ?><Configuration status="WARN"><Appenders><Console name="Console" target="SYSTEM_OUT"><PatternLayout pattern="%d{ISO8601} %p [%t] %c - %m%n"/></Console></Appenders><Loggers><Root level="info"><AppenderRef ref="Console"/></Root><Logger name="org.apache.druid.jetty.RequestLog" additivity="false" level="WARN"><AppenderRef ref="Console"/></Logger><Logger name="com.amazonaws" additivity="false" level="WARN"><AppenderRef ref="Console"/></Logger></Loggers></Configuration>
