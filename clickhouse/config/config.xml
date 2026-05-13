@@ -1,17 +1,74 @@
 <?xml version="1.0"?>
+<<<<<<< HEAD
 <clickhouse>
     <listen_host>0.0.0.0</listen_host>
+=======
+<!--
+  ClickHouse server configuration override - local dev single-node.
+  Placed in /etc/clickhouse-server/config.d/ and deep-merged over the
+  image's built-in config.xml at startup.
+
+  Reference: https://clickhouse.com/docs/en/operations/server-configuration-parameters/settings
+-->
+<clickhouse>
+
+    <!-- Network section -->
+    <!-- Network - listen on all interfaces for both protocols               -->
+    <!-- End network config -->
+    <listen_host>0.0.0.0</listen_host>
+
+    <!-- HTTP interface (port 8123) and Play UI are enabled by default.      -->
+    <!-- Native TCP interface (port 9000) is enabled by default.             -->
+
+    <!-- Memory section -->
+    <!--
+        Hard ceiling on total server memory usage.
+        4 GiB is safe for a laptop dev environment alongside Kafka + Flink.
+        Set to 0 to disable the cap (use all available RAM).
+    -->
+>>>>>>> b1da042524ca04838043693ba436a6a6af0ce459
     <max_server_memory_usage>4294967296</max_server_memory_usage>
     <max_server_memory_usage_to_ram_ratio>0.9</max_server_memory_usage_to_ram_ratio>
+<<<<<<< HEAD
+=======
+
+    <!-- Thread pools section -->
+    <!--
+        Global thread pool shared by all queries.
+        8 threads is appropriate for a 4-core dev laptop (2× cores).
+        Raise to 16–32 on a production host.
+    -->
+>>>>>>> b1da042524ca04838043693ba436a6a6af0ce459
     <max_thread_pool_size>8</max_thread_pool_size>
     <background_pool_size>4</background_pool_size>
     <background_message_broker_schedule_pool_size>4</background_message_broker_schedule_pool_size>
+<<<<<<< HEAD
+=======
+
+    <!-- Kafka engine section -->
+    <!--
+        Default settings applied to every Kafka table that does not override
+        them in its own SETTINGS clause.
+
+        kafka_num_consumers:
+          Number of consumer threads per Kafka table.  Each thread owns one
+          Kafka partition assignment.  Set to min(num_partitions, this value).
+          4 matches the default topic partition count for dev topics.
+
+        See also: per-table SETTINGS in CREATE TABLE … ENGINE = Kafka(…)
+    -->
+>>>>>>> b1da042524ca04838043693ba436a6a6af0ce459
     <kafka>
         <num_consumers>4</num_consumers>
         <poll_max_batch_size>65536</poll_max_batch_size>
         <flush_interval_milliseconds>7500</flush_interval_milliseconds>
         <max_retries>0</max_retries>
     </kafka>
+<<<<<<< HEAD
+=======
+
+    <!-- Logging section -->
+>>>>>>> b1da042524ca04838043693ba436a6a6af0ce459
     <logger>
         <level>warning</level>
         <log>/var/log/clickhouse-server/clickhouse-server.log</log>
@@ -20,10 +77,20 @@
         <count>3</count>
         <console>1</console>
     </logger>
+<<<<<<< HEAD
+=======
+
+    <!-- Storage paths section -->
+>>>>>>> b1da042524ca04838043693ba436a6a6af0ce459
     <path>/var/lib/clickhouse/</path>
     <tmp_path>/var/lib/clickhouse/tmp/</tmp_path>
     <user_files_path>/var/lib/clickhouse/user_files/</user_files_path>
     <format_schema_path>/var/lib/clickhouse/format_schemas/</format_schema_path>
+<<<<<<< HEAD
+=======
+
+    <!-- Query log section -->
+>>>>>>> b1da042524ca04838043693ba436a6a6af0ce459
     <query_log>
         <database>system</database>
         <table>query_log</table>

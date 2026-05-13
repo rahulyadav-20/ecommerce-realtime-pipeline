@@ -1,17 +1,56 @@
 <?xml version="1.0"?>
+<<<<<<< HEAD
+=======
+<!--
+  ClickHouse user / profile / quota configuration - local dev.
+  Placed in /etc/clickhouse-server/users.d/ and deep-merged over the
+  image's built-in users.xml at startup.
+
+  Security note: the default user has NO PASSWORD and network access from
+  any IP (::/0).  This is intentional for a localhost-only Docker network.
+  Add a password and restrict networks before exposing to any shared environment.
+
+  Reference: https://clickhouse.com/docs/en/operations/access-rights
+-->
+>>>>>>> b1da042524ca04838043693ba436a6a6af0ce459
 <clickhouse>
     <profiles>
+<<<<<<< HEAD
+=======
+
+        <!--
+          default - applied to the `default` user and any user that does not
+          explicitly select a different profile.
+        -->
+>>>>>>> b1da042524ca04838043693ba436a6a6af0ce459
         <default>
             <max_memory_usage>4294967296</max_memory_usage>
             <max_bytes_before_external_sort>2147483648</max_bytes_before_external_sort>
             <max_bytes_before_external_group_by>2147483648</max_bytes_before_external_group_by>
             <max_threads>8</max_threads>
+<<<<<<< HEAD
             <kafka_num_consumers>4</kafka_num_consumers>
+=======
+
+            <!--
+                Kafka consumer threads per table (mirrors server-level default
+                in config.xml for clarity - the more specific table-level
+                SETTINGS clause always wins).
+            -->
+            <!-- <kafka_num_consumers>4</kafka_num_consumers> -->
+
+            <!-- Allow DDL (CREATE / DROP / ALTER) from the default user.   -->
+>>>>>>> b1da042524ca04838043693ba436a6a6af0ce459
             <allow_ddl>1</allow_ddl>
             <allow_experimental_object_type>1</allow_experimental_object_type>
             <output_format_pretty_max_rows>50000</output_format_pretty_max_rows>
             <readonly>0</readonly>
         </default>
+<<<<<<< HEAD
+=======
+
+        <!-- readonly profile - useful for BI tools / dashboards            -->
+>>>>>>> b1da042524ca04838043693ba436a6a6af0ce459
         <readonly>
             <readonly>1</readonly>
             <max_memory_usage>2147483648</max_memory_usage>
@@ -19,6 +58,14 @@
         </readonly>
     </profiles>
     <users>
+<<<<<<< HEAD
+=======
+
+        <!--
+          default - no-password local dev user.
+          Maps to the `ecom` database created via CLICKHOUSE_DB env var.
+        -->
+>>>>>>> b1da042524ca04838043693ba436a6a6af0ce459
         <default>
             <password></password>
             <networks>
@@ -31,6 +78,14 @@
             <show_named_collections>1</show_named_collections>
             <show_named_collections_secrets>0</show_named_collections_secrets>
         </default>
+<<<<<<< HEAD
+=======
+
+        <!--
+          clickhouse_client - a restricted user for the clickhouse-client
+          container.  Same permissions as default for local dev.
+        -->
+>>>>>>> b1da042524ca04838043693ba436a6a6af0ce459
         <clickhouse_client>
             <password></password>
             <networks>
@@ -42,6 +97,10 @@
         </clickhouse_client>
     </users>
     <quotas>
+<<<<<<< HEAD
+=======
+        <!-- default - unlimited for local dev.                             -->
+>>>>>>> b1da042524ca04838043693ba436a6a6af0ce459
         <default>
             <interval>
                 <duration>3600</duration>
