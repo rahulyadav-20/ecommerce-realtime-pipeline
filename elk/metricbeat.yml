@@ -136,10 +136,7 @@ output.elasticsearch:
 setup.kibana:
   host: "${KIBANA_HOST:http://kibana:5601}"
 
-setup.dashboards.enabled: true
-setup.dashboards.retry.enabled: true
-setup.dashboards.retry.interval: 15s
-setup.dashboards.retry.maximum: 20
+setup.dashboards.enabled: false
 
 # -----------------------------------------------------------------------------
 # INDEX TEMPLATE

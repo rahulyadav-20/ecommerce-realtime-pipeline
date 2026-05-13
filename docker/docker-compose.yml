@@ -601,7 +601,7 @@ services:
   # =========================================================================
   # CLICKHOUSE 24 — historical OLAP
   # HTTP / Play UI  → http://localhost:8123/play
-  # Native protocol → localhost:9000  (JDBC, clickhouse-client, Flink sink)
+  # Native protocol → localhost:19000 (JDBC, clickhouse-client, Flink sink) — 9000/9001 taken on host
   # ch-ui           → http://localhost:8124
   #
   # Config overrides (deep-merged at startup):
@@ -616,19 +616,16 @@ services:
     container_name: clickhouse
     ports:
       - "8123:8123"   # HTTP interface + Play UI (/play)
-      - "9000:9000"   # Native binary protocol (JDBC / clickhouse-client / Flink)
+      - "19000:9000"  # Native binary protocol (JDBC / clickhouse-client) — host:19000 (9000 + 9001 are taken)
     environment:
       CLICKHOUSE_DB: ecom
       CLICKHOUSE_USER: default
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     volumes:
       - clickhouse-data:/var/lib/clickhouse
-      # Server config override: memory, thread pool, Kafka consumer defaults
-      - ../clickhouse/config/config.xml:/etc/clickhouse-server/config.d/custom.xml:ro
-      # User / profile / quota config: default user (no password), max_memory_usage
-      - ../clickhouse/config/users.xml:/etc/clickhouse-server/users.d/custom.xml:ro
       # SQL init scripts run once on first boot (create tables, materialized views, etc.)
       - ../clickhouse/init:/docker-entrypoint-initdb.d:ro
+      # Note: custom config.xml/users.xml removed — using image defaults for local dev
     ulimits:
       nofile:
         soft: 262144
@@ -679,11 +676,15 @@ services:
       clickhouse:
         condition: service_healthy
     ports:
-      - "8124:5521"
+      - "8124:3488"
     environment:
-      VITE_CLICKHOUSE_URL: "http://localhost:8123"
-      VITE_CLICKHOUSE_USER: default
-      VITE_CLICKHOUSE_PASSWORD: ""
+      # ch-ui v2 env vars (server-side connection — must use Docker hostname, not localhost)
+      CLICKHOUSE_URL: "http://clickhouse:8123"
+      CLICKHOUSE_USER: "default"
+      CLICKHOUSE_PASSWORD: ""
+      CH_UI_CLICKHOUSE_URL: "http://clickhouse:8123"
+      CH_UI_CLICKHOUSE_USER: "default"
+      CH_UI_CLICKHOUSE_PASSWORD: ""
     networks:
       - ecom-net
 
@@ -826,7 +827,7 @@ services:
     networks:
       - ecom-net
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8181/v1/config || exit 1"]
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/8181' 2>/dev/null || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -997,7 +998,7 @@ services:
 
       # Heap: 2g / 2g matches the spec.  Rule of thumb: no more than 50 % of
       # available RAM and never exceed 30 GB (compressed OOPs threshold).
-      ES_JAVA_OPTS: "-Xms2g -Xmx2g"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
 
     ulimits:
       memlock:
@@ -1033,7 +1034,7 @@ services:
       - "5044:5044"   # Beats input (Filebeat → Logstash)
       - "9600:9600"   # Logstash monitoring REST API
     environment:
-      LS_JAVA_OPTS: "-Xms1g -Xmx1g"
+      LS_JAVA_OPTS: "-Xms256m -Xmx256m"
       # Disable X-Pack monitoring to reduce ES load in local dev
       XPACK_MONITORING_ENABLED: "false"
       # Persistent queue — survives Logstash restarts without dropping events

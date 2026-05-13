@@ -32,7 +32,7 @@
 --   At ~1 M events/day a partition is roughly 50–200 MB on disk after
 --   compression — well within ClickHouse's optimal 1 GB/part target.
 --
--- TTL event_time + INTERVAL 2 YEAR DELETE
+-- TTL toDate(event_time) + INTERVAL 730 DAY DELETE
 --   Raw events are archived to Iceberg/MinIO by the Airflow compaction DAG
 --   after 90 days.  The 2-year TTL here is a safety net: it evicts parts
 --   that were never archived (e.g. data from failed archive runs) and keeps
@@ -165,7 +165,7 @@ ORDER BY (event_type, category, event_time, event_id)
 -- ttl_only_drop_parts = 1 (see SETTINGS below) ensures the engine waits
 -- until every row in a part has expired before dropping it, which avoids
 -- rewriting parts and is far more I/O-efficient than row-level TTL deletes.
-TTL event_time + INTERVAL 2 YEAR DELETE
+TTL toDate(event_time) + INTERVAL 730 DAY DELETE
 
 SETTINGS
     -- Granule size for the sparse primary index.  8192 rows per granule is
@@ -189,7 +189,10 @@ SETTINGS
     -- Allow deduplication to occur across consecutive merges, not just within
     -- a single merge step.  Required when the same event_id can arrive in
     -- different Flink checkpoints (i.e. across part boundaries).
-    replicated_deduplication_window = 0;
+    replicated_deduplication_window = 0,
+
+    -- Allow nullable columns in the sorting key (category is Nullable).
+    allow_nullable_key = 1;
 
 
 -- =============================================================================

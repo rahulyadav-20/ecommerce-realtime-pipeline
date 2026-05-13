@@ -174,7 +174,7 @@ CREATE TABLE IF NOT EXISTS ecom.kafka_errors
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(captured_at)
 ORDER BY (captured_at)
-TTL captured_at + INTERVAL 30 DAY DELETE   -- errors are short-lived diagnostic data
+TTL toDate(captured_at) + INTERVAL 30 DAY DELETE
 SETTINGS
     index_granularity   = 8192,
     ttl_only_drop_parts = 1;

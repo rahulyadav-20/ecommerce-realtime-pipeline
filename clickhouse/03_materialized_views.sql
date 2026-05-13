@@ -95,10 +95,11 @@ PARTITION BY toYYYYMMDD(window_start)
 ORDER BY (category, event_type, window_start)
 -- 30 days: live dashboards rarely need per-minute resolution older than a month.
 -- For longer-range trends the 5-minute funnel MV below is more appropriate.
-TTL window_start + INTERVAL 30 DAY DELETE
+TTL toDate(window_start) + INTERVAL 30 DAY DELETE
 SETTINGS
     index_granularity   = 8192,
-    ttl_only_drop_parts = 1;
+    ttl_only_drop_parts = 1,
+    allow_nullable_key  = 1;
 
 
 -- 1b. Materialized view ───────────────────────────────────────────────────────
@@ -193,10 +194,11 @@ PARTITION BY toYYYYMMDD(window_start)
 -- category first: the funnel panel always scopes to one category.
 -- window_start second: time range scan within a category.
 ORDER BY (category, window_start)
-TTL window_start + INTERVAL 90 DAY DELETE
+TTL toDate(window_start) + INTERVAL 90 DAY DELETE
 SETTINGS
     index_granularity   = 8192,
-    ttl_only_drop_parts = 1;
+    ttl_only_drop_parts = 1,
+    allow_nullable_key  = 1;
 
 
 -- 2b. Materialized view ───────────────────────────────────────────────────────

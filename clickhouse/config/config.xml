@@ -1,79 +1,17 @@
 <?xml version="1.0"?>
-<!--
-  ClickHouse server configuration override — local dev single-node.
-  Placed in /etc/clickhouse-server/config.d/ and deep-merged over the
-  image's built-in config.xml at startup.
-
-  Reference: https://clickhouse.com/docs/en/operations/server-configuration-parameters/settings
--->
 <clickhouse>
-
-    <!-- ------------------------------------------------------------------ -->
-    <!-- Network — listen on all interfaces for both protocols               -->
-    <!-- ------------------------------------------------------------------ -->
     <listen_host>0.0.0.0</listen_host>
-
-    <!-- HTTP interface (port 8123) and Play UI are enabled by default.      -->
-    <!-- Native TCP interface (port 9000) is enabled by default.             -->
-
-    <!-- ------------------------------------------------------------------ -->
-    <!-- Memory                                                              -->
-    <!-- ------------------------------------------------------------------ -->
-    <!--
-        Hard ceiling on total server memory usage.
-        4 GiB is safe for a laptop dev environment alongside Kafka + Flink.
-        Set to 0 to disable the cap (use all available RAM).
-    -->
     <max_server_memory_usage>4294967296</max_server_memory_usage>
-
-    <!--
-        Fraction of physical RAM the server is allowed to use before the
-        OS-based memory watchdog kicks in. 0.9 = 90 %.
-        Ignored when max_server_memory_usage is set explicitly.
-    -->
     <max_server_memory_usage_to_ram_ratio>0.9</max_server_memory_usage_to_ram_ratio>
-
-    <!-- ------------------------------------------------------------------ -->
-    <!-- Thread pools                                                        -->
-    <!-- ------------------------------------------------------------------ -->
-    <!--
-        Global thread pool shared by all queries.
-        8 threads is appropriate for a 4-core dev laptop (2× cores).
-        Raise to 16–32 on a production host.
-    -->
     <max_thread_pool_size>8</max_thread_pool_size>
-
-    <!-- Background IO pool used by merges, mutations, and fetches.         -->
     <background_pool_size>4</background_pool_size>
-
-    <!-- Background pool for Kafka / Kinesis consumer polling tasks.        -->
     <background_message_broker_schedule_pool_size>4</background_message_broker_schedule_pool_size>
-
-    <!-- ------------------------------------------------------------------ -->
-    <!-- Kafka engine defaults                                               -->
-    <!-- ------------------------------------------------------------------ -->
-    <!--
-        Default settings applied to every Kafka table that does not override
-        them in its own SETTINGS clause.
-
-        kafka_num_consumers:
-          Number of consumer threads per Kafka table.  Each thread owns one
-          Kafka partition assignment.  Set to min(num_partitions, this value).
-          4 matches the default topic partition count for dev topics.
-
-        See also: per-table SETTINGS in CREATE TABLE … ENGINE = Kafka(…)
-    -->
     <kafka>
         <num_consumers>4</num_consumers>
         <poll_max_batch_size>65536</poll_max_batch_size>
         <flush_interval_milliseconds>7500</flush_interval_milliseconds>
-        <!-- Retry indefinitely on transient broker errors during dev.      -->
         <max_retries>0</max_retries>
     </kafka>
-
-    <!-- ------------------------------------------------------------------ -->
-    <!-- Logging (keep dev logs concise)                                     -->
-    <!-- ------------------------------------------------------------------ -->
     <logger>
         <level>warning</level>
         <log>/var/log/clickhouse-server/clickhouse-server.log</log>
@@ -82,18 +20,10 @@
         <count>3</count>
         <console>1</console>
     </logger>
-
-    <!-- ------------------------------------------------------------------ -->
-    <!-- Storage paths (must match the volume mount in docker-compose)       -->
-    <!-- ------------------------------------------------------------------ -->
     <path>/var/lib/clickhouse/</path>
     <tmp_path>/var/lib/clickhouse/tmp/</tmp_path>
     <user_files_path>/var/lib/clickhouse/user_files/</user_files_path>
     <format_schema_path>/var/lib/clickhouse/format_schemas/</format_schema_path>
-
-    <!-- ------------------------------------------------------------------ -->
-    <!-- Query log (useful for dev debugging, disabled in prod by default)   -->
-    <!-- ------------------------------------------------------------------ -->
     <query_log>
         <database>system</database>
         <table>query_log</table>
@@ -101,5 +31,4 @@
         <partition_by>toYYYYMM(event_date)</partition_by>
         <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
     </query_log>
-
 </clickhouse>
