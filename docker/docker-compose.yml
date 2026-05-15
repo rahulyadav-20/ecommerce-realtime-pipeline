@@ -145,6 +145,7 @@ volumes:
   logstash-data:
   airflow-postgres-data:
   airflow-logs:
+  redis-cache-data:         # FastAPI query-result cache (LRU, 512 MB)
 
 networks:
   ecom-net:
@@ -1169,3 +1170,205 @@ services:
       - ../elk/heartbeat.yml:/usr/share/heartbeat/heartbeat.yml:ro
     networks:
       - ecom-net
+
+  # ===========================================================================
+  # DASHBOARD LAYER  (Phase 9)
+  # ===========================================================================
+  #
+  # Three services added to the core stack:
+  #
+  #   redis-cache    → query result cache for dashboard-api    :6379
+  #   dashboard-api  → FastAPI query backend (Druid/CH/Flink)  :8000
+  #   dashboard-ui   → React SPA served by Nginx               :3000
+  #
+  # Quick start (after the core stack is up):
+  #   docker compose -f docker/docker-compose.yml up -d \
+  #       redis-cache dashboard-api dashboard-ui
+  #
+  # Validation:
+  #   curl http://localhost:8000/docs          # FastAPI Swagger UI
+  #   curl http://localhost:8000/api/v1/health # JSON health check
+  #   curl -s -o /dev/null -w "%{http_code}" http://localhost:3000  # → 200
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # REDIS CACHE
+  #
+  # Used exclusively by dashboard-api for query result caching.
+  # • Max memory : 512 MB   (volatile-lru eviction — only TTL-tagged keys)
+  # • Persistence: AOF every-second + RDB snapshot every 60 s
+  #   (cache is recoverable on restart; cold-start is safe)
+  # • No AUTH in local dev; add requirepass in production
+  #
+  # NOTE: prompt specified "redis-cache" as the service name to distinguish
+  # it from any future Redis used by Airflow / other services.
+  # ---------------------------------------------------------------------------
+  redis-cache:
+    image: redis:7-alpine
+    hostname: redis-cache
+    container_name: redis-cache
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+        --maxmemory 512mb
+        --maxmemory-policy volatile-lru
+        --save 60 1
+        --appendonly yes
+        --appendfsync everysec
+        --loglevel warning
+    volumes:
+      - redis-cache-data:/data
+    networks:
+      - ecom-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # DASHBOARD API  (FastAPI)
+  #
+  # Unified query backend that aggregates data from:
+  #   • Apache Druid    — real-time KPIs and revenue timeseries
+  #   • ClickHouse      — funnel, top products, live events
+  #   • Flink REST API  — job status, throughput, checkpoint stats
+  #
+  # URL corrections vs. the step 9.4 prompt:
+  #   DRUID_URL:
+  #     Prompt said http://druid-broker:8082 (Broker direct).
+  #     ✅ Corrected to http://druid-router:8888 — the Router is the
+  #        recommended Druid API entry point; it proxies SQL to the Broker
+  #        and provides the full /druid/v2/sql surface.
+  #
+  #   CLICKHOUSE_URL:
+  #     Prompt said clickhouse://clickhouse-server:9000 (native DSN).
+  #     ✅ Split into two variables:
+  #        CLICKHOUSE_URL   = http://clickhouse:8123   (HTTP; health check)
+  #        CLICKHOUSE_HOST  = clickhouse               }  clickhouse-driver
+  #        CLICKHOUSE_NATIVE_PORT = 9000              }  (binary protocol)
+  #     The clickhouse-driver uses native port 9000 inside Docker
+  #     (external host port is 19000 — see ClickHouse service).
+  #
+  #   FLINK_URL:
+  #     Prompt said http://flink-jobmanager:8081 — ✅ correct internal port.
+  #     (Host exposes it as :8082; containers use :8081.)
+  # ---------------------------------------------------------------------------
+  dashboard-api:
+    build:
+      context: ../dashboard-api
+      dockerfile: Dockerfile
+    image: ecom/dashboard-api:latest
+    hostname: dashboard-api
+    container_name: dashboard-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # ── App ──────────────────────────────────────────────────────────────────
+      APP_ENV: docker
+      DEBUG: "false"
+
+      # ── Apache Druid (via Router — recommended entry point) ────────────────
+      DRUID_URL: "http://druid-router:8888"
+      DRUID_TIMEOUT: "30"
+      DRUID_MAX_RETRIES: "3"
+      DRUID_BACKOFF_FACTOR: "0.5"
+
+      # ── ClickHouse — HTTP (health/simple queries) + native (bulk reads) ────
+      # HTTP interface (health check, small queries):
+      CLICKHOUSE_URL: "http://clickhouse:8123"
+      CLICKHOUSE_TIMEOUT: "30"
+      # clickhouse-driver native binary protocol (faster for analytical queries):
+      CLICKHOUSE_HOST: "clickhouse"
+      CLICKHOUSE_NATIVE_PORT: "9000"   # container-internal; host exposes :19000
+      CLICKHOUSE_USER: "default"
+      CLICKHOUSE_PASSWORD: ""
+      CLICKHOUSE_DATABASE: "ecom"
+      CLICKHOUSE_POOL_SIZE: "5"
+      CLICKHOUSE_QUERY_TIMEOUT: "60"
+
+      # ── Apache Flink REST API ─────────────────────────────────────────────
+      # Container-internal REST port is 8081; host maps it to 8082.
+      FLINK_URL: "http://flink-jobmanager:8081"
+      FLINK_TIMEOUT: "10"
+      FLINK_MAX_RETRIES: "3"
+      FLINK_BACKOFF_FACTOR: "0.3"
+
+      # ── Kafka (consumer-lag health approximation) ─────────────────────────
+      KAFKA_BOOTSTRAP_SERVERS: "kafka-1:29092,kafka-2:29093"
+      KAFKA_CONSUMER_GROUP: "flink-ecom-etl"
+      KAFKA_CLEAN_TOPIC: "ecommerce.events.clean.v1"
+
+      # ── Redis cache ───────────────────────────────────────────────────────
+      REDIS_URL: "redis://redis-cache:6379"
+      REDIS_MAX_CONNECTIONS: "20"
+
+      # ── CORS — allow React dev server, Nginx, and direct browser access ───
+      CORS_ORIGINS: '["http://localhost:3000","http://localhost:5173","http://dashboard-ui:80"]'
+
+      # ── Cache TTLs (seconds) ──────────────────────────────────────────────
+      CACHE_TTL_KPIS: "30"        # KPI cards refresh every 5 s → short TTL
+      CACHE_TTL_TIMESERIES: "60"  # Revenue chart refreshes every 30 s
+      CACHE_TTL_FUNNEL: "300"     # Funnel data is stable; 5-min TTL
+      CACHE_TTL_PRODUCTS: "300"   # Top-products: 5-min TTL
+      CACHE_TTL_LIVE: "5"         # Live events: match polling interval
+      CACHE_TTL_FLINK: "15"       # Flink metrics: match health-check interval
+    depends_on:
+      redis-cache:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      flink-jobmanager:
+        condition: service_healthy
+      druid-router:
+        condition: service_started   # Druid has no /health equivalent for service_healthy
+    networks:
+      - ecom-net
+    healthcheck:
+      # /api/v1/health performs parallel sub-checks (Druid/CH/Flink) and
+      # returns 200 even when some components are degraded (fail-open).
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/v1/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ---------------------------------------------------------------------------
+  # DASHBOARD UI  (React + Nginx)
+  #
+  # • Multi-stage Docker build: Node 20 builds the Vite SPA, then Nginx
+  #   serves the static dist/ bundle.
+  # • Nginx proxies /api/* and /ws/* to dashboard-api:8000, so the browser
+  #   only ever talks to one origin (no CORS preflight in production).
+  # • VITE_API_URL is a build-time env var baked into the JS bundle.
+  #   At runtime the proxy handles routing — no env var is needed in Nginx.
+  # ---------------------------------------------------------------------------
+  dashboard-ui:
+    build:
+      context: ../dashboard-ui
+      dockerfile: Dockerfile
+      args:
+        # Build-time variable: baked into the JavaScript bundle.
+        # In production, change to your actual domain/IP.
+        VITE_API_URL: "http://localhost:8000"
+    image: ecom/dashboard-ui:latest
+    hostname: dashboard-ui
+    container_name: dashboard-ui
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      dashboard-api:
+        condition: service_healthy
+    networks:
+      - ecom-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/ >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

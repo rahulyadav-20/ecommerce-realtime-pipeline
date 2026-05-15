@@ -1,0 +1,104 @@
+# =============================================================================
+# DEPRECATED — dashboard services are now part of docker-compose.yml (Step 9.4)
+# =============================================================================
+#
+# The three dashboard services (redis-cache, dashboard-api, dashboard-ui)
+# have been integrated directly into docker/docker-compose.yml.
+#
+# Use this file ONLY if you need to run the dashboard layer against an
+# already-running core stack started from a DIFFERENT Compose project
+# (i.e., the main stack was started from outside this directory).
+#
+# Standard usage (services now in main compose):
+#   docker compose -f docker/docker-compose.yml up -d
+#   docker compose -f docker/docker-compose.yml up -d redis-cache dashboard-api dashboard-ui
+#
+# Legacy split usage (this file, for external core stack):
+#   docker compose -f docker/docker-compose.yml \
+#                  -f docker/docker-compose.dashboard.yml up -d
+# =============================================================================
+
+services:
+
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  redis-cache:
+    image: redis:7-alpine
+    container_name: redis-cache
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-cache-data:/data
+    command: >
+      redis-server
+        --maxmemory 512mb
+        --maxmemory-policy volatile-lru
+        --save 60 1
+        --appendonly yes
+        --appendfsync everysec
+        --loglevel warning
+    networks:
+      - ecom-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── FastAPI Backend ────────────────────────────────────────────────────────
+  dashboard-api:
+    build:
+      context: ../dashboard-api
+      dockerfile: Dockerfile
+    image: ecom/dashboard-api:latest
+    container_name: dashboard-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      APP_ENV: docker
+      DEBUG: "false"
+      DRUID_URL: "http://druid-router:8888"
+      CLICKHOUSE_URL: "http://clickhouse:8123"
+      CLICKHOUSE_HOST: "clickhouse"
+      CLICKHOUSE_NATIVE_PORT: "9000"
+      CLICKHOUSE_DATABASE: "ecom"
+      FLINK_URL: "http://flink-jobmanager:8081"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka-1:29092,kafka-2:29093"
+      REDIS_URL: "redis://redis-cache:6379"
+      CORS_ORIGINS: '["http://localhost:3000","http://localhost:5173"]'
+    depends_on:
+      redis-cache:
+        condition: service_healthy
+    networks:
+      - ecom-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/v1/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ── React Dashboard ────────────────────────────────────────────────────────
+  dashboard-ui:
+    build:
+      context: ../dashboard-ui
+      dockerfile: Dockerfile
+    image: ecom/dashboard-ui:latest
+    container_name: dashboard-ui
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      dashboard-api:
+        condition: service_healthy
+    networks:
+      - ecom-net
+
+volumes:
+  redis-cache-data:
+
+networks:
+  ecom-net:
+    external: true
+    name: docker_ecom-net   # Docker prefixes with the project dir name

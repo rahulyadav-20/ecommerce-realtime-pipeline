@@ -1,0 +1,72 @@
+# ── Node / npm ────────────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Vite / React build output
+dashboard-ui/dist/
+dashboard-ui/.vite/
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Python cache directories
+config/__pycache__/
+dashboard-api/**/__pycache__/
+
+# ── Java / Maven ──────────────────────────────────────────────────────────────
+flink-app/target/
+*.class
+*.jar
+# Keep the pre-built standalone JAR (used when skipping Maven build)
+!flink-app/ecom-streaming-etl.jar
+
+# ── Docker env files (may contain secrets) ────────────────────────────────────
+docker/.env
+docker/kafka-connect/plugins/
+
+# ── IDE / OS ──────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Logs & temp ───────────────────────────────────────────────────────────────
+*.log
+logs/
+tmp/
+temp/
+
+# ── Test / coverage ───────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+tests/performance/results/
+!tests/performance/results/.gitkeep
+
+# ── Secrets ───────────────────────────────────────────────────────────────────
+*.pem
+*.key
+*.crt
+secrets/
+config/prod.env

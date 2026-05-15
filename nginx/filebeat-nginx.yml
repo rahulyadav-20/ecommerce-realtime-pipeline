@@ -1,0 +1,89 @@
+# ==============================================================================
+# nginx/filebeat-nginx.yml — Filebeat input for nginx JSON access logs
+# Ships structured nginx logs to Elasticsearch for Kibana dashboards.
+#
+# Dashboards available after import:
+#   Kibana → Integrations → Nginx → nginx.access
+# ==============================================================================
+
+filebeat.inputs:
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/nginx/access.log
+    # Nginx logs are JSON — parse each line as a document
+    json.keys_under_root: true
+    json.add_error_key: true
+    json.message_key: uri
+
+    # Add metadata fields to every event
+    fields:
+      service:     nginx-proxy
+      environment: production
+      pipeline:    ecom-realtime
+    fields_under_root: true
+
+    # Multiline: nginx access logs are single-line; this is a no-op safety net
+    multiline.type:    pattern
+    multiline.pattern: '^\{'
+    multiline.negate:  true
+    multiline.match:   after
+
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/nginx/error.log
+    fields:
+      service:     nginx-proxy
+      log_type:    error
+      environment: production
+    fields_under_root: true
+
+# ── Processing pipeline ───────────────────────────────────────────────────────
+processors:
+  # Parse @timestamp from nginx's time field
+  - timestamp:
+      field:    "@timestamp"
+      layouts:
+        - "2006-01-02T15:04:05+07:00"
+        - "2006-01-02T15:04:05Z"
+      test:
+        - "2026-05-15T10:30:45+00:00"
+
+  # Drop health-check pings to reduce noise
+  - drop_event:
+      when:
+        or:
+          - equals: { uri: "/health" }
+          - equals: { uri: "/nginx-status" }
+          - equals: { uri: "/favicon.ico" }
+
+  # Enrich with GeoIP (requires Elasticsearch ingest pipeline)
+  - add_fields:
+      target: ""
+      fields:
+        ecs.version: "8.0.0"
+
+# ── Output ────────────────────────────────────────────────────────────────────
+output.elasticsearch:
+  hosts: ["${ELASTICSEARCH_HOST:http://elasticsearch:9200}"]
+  index: "nginx-access-%{+yyyy.MM.dd}"
+  bulk_max_size: 2048
+
+# ── Index template ────────────────────────────────────────────────────────────
+setup.template:
+  name:    "nginx-access"
+  pattern: "nginx-access-*"
+  settings:
+    index.number_of_shards:   1
+    index.number_of_replicas: 0   # single-node cluster; set to 1 for multi-node
+
+# ── Kibana (for dashboard setup) ──────────────────────────────────────────────
+setup.kibana:
+  host: "${KIBANA_HOST:http://kibana:5601}"
+
+setup.dashboards.enabled: false   # enable to auto-import nginx dashboards
+
+# ── Logging (Filebeat's own logs) ─────────────────────────────────────────────
+logging.level: warning
+logging.to_files: false
